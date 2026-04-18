@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+out/
+coverage/
+.turbo/
+pnpm-lock.yaml
+*.tsbuildinfo
+
+# Authored prose — don't auto-rewrap. Code-adjacent markdown (READMEs)
+# can opt back in explicitly if needed later.
+docs/
