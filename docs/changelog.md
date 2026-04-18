@@ -5,7 +5,117 @@ below, with full detail further down.
 
 ## Index
 
+- **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.2.0 — 2026-04-18
+
+First runtime code in the repo. `@brandfactory/shared` is now the wire
+contract every other package builds against: schema-first with zod, types
+inferred, zero business logic, one runtime dep (`zod ^4.3.6`). Both
+`packages/server` and `packages/web` depend on it via `workspace:*` and
+successfully parse a `BrandSchema` payload end-to-end.
+
+### Phase 1 execution plan — `docs/executing/phase-1-shared-package.md`
+
+- Expanded Phase 1 of the scaffolding plan into a concrete, methodical
+  file-by-file task list before any code was written.
+- Locked five design decisions up front: brand guidelines are fully
+  dynamic (no category enum), sections are normalized (their own table in
+  Phase 2), suggested categories ship as seed data, section body =
+  ProseMirror/TipTap JSON, concurrency v1 = section-level last-write-wins.
+- Enumerated open questions with leanings (`createdBy` on sections,
+  integer `priority`, derived `ShortlistView`) so execution had clear
+  defaults.
+
+### Phase 1 implementation — `packages/shared`
+
+Nine source files under `src/`, grouped by domain, behind a single barrel.
+
+- **Primitives.** `json.ts` — recursive `JsonValue` + `ProseMirrorDoc`
+  alias (typed as generic JSON at the schema boundary; TipTap enforces
+  ProseMirror validity client-side). `ids.ts` — `brandedId<TBrand>()`
+  helper plus eight concrete branded ids (`BrandId`, `WorkspaceId`,
+  `ProjectId`, `CanvasId`, `CanvasBlockId`, `PinId`, `SectionId`,
+  `UserId`). Runtime is a plain string; the compile-time type is nominal
+  so `BrandId` and `ProjectId` are not interchangeable.
+- **Workspace.** `workspace/workspace.ts` — `id`, `name`, `ownerUserId`,
+  timestamps. No membership/permissions until multi-user flows land.
+- **Brand + guidelines.** `brand/brand.ts` exports three schemas:
+  `BrandSchema` (the row, no embedded sections), `BrandSummarySchema`
+  (`pick` projection for list/picker surfaces) and
+  `BrandWithSectionsSchema` (API-level join shape).
+  `brand/guideline-section.ts` — fully user-defined sections:
+  free-text `label`, `body: ProseMirrorDoc`, sparse-integer `priority`,
+  `createdBy: 'user' | 'agent'`, timestamps. No hardcoded category enum.
+  `brand/suggested-categories.ts` — static `SUGGESTED_SECTIONS` seed
+  (Voice & tone, Target audience, Values & positioning, Visual guidelines,
+  Messaging frameworks) rendered by the frontend as a starter picker.
+  Data, not schema.
+- **Project + canvas.** `project/project.ts` — discriminated union on
+  `kind`: `freeform` vs `standardized` (with `templateId`).
+  `project/canvas.ts` — `CanvasSchema` container, `CanvasBlockSchema`
+  4-way discriminated union (`text`, `image`, `file`, `snippet`),
+  `PinSchema`, and `ShortlistViewSchema` as a derived projection
+  (not a stored entity). Base shapes are plain TS object literals spread
+  into each branch, keeping zod's discriminated-union fast path intact.
+- **Agent event stream.** `agent/events.ts` — `AgentMessageSchema`,
+  `AgentToolCallSchema`, `CanvasOpSchema` (add-block / update-block /
+  remove-block), `PinOpSchema` (pin / unpin), event-stream envelopes
+  (`CanvasOpEventSchema`, `PinOpEventSchema`) and the outer
+  `AgentEventSchema`. The outer union uses `z.union` rather than
+  `z.discriminatedUnion` because two branches wrap an inner discriminated
+  union on `op` — a pattern zod's discriminated-union fast path doesn't
+  accept.
+- **Conventions.** Schema-first with `z.infer` types, `z.iso.datetime()`
+  at every timestamp, no defaults, no business logic, no validators or
+  guards. ESM-only, zero runtime deps beyond `zod`.
+
+### Consumer wiring
+
+- `packages/server` and `packages/web` each gained
+  `@brandfactory/shared: workspace:*` as a dependency. These wire-ups
+  would have been needed by Phases 4 / 7 anyway; landing them now let the
+  smoke check actually exercise the cross-package `import`.
+
+### Zod 4 API notes
+
+- Datetimes use `z.iso.datetime()` (zod 4 form; the v3 `z.string().datetime()`
+  still works but is deprecated).
+- Integers use `z.number().int()` — universal across zod 4 minor
+  versions, no behaviour difference vs the top-level `z.int()` helper.
+- `z.record(z.string(), V)` — zod 4 requires both key and value schemas.
+
+### Phase 1 completion record — `docs/completions/phase1.md`
+
+Full record of what was written, where, and why. Includes the five
+locked design decisions, the plan's open questions resolved with
+justification, and the in-flight refinements to the execution plan
+(`ProjectBase` / `CanvasBlockBase` as plain object literals,
+`AgentEventSchema` as `z.union`, `BrandSummary` added as a `pick`
+projection, `GuidelineSectionCreatedBySchema` / `PinCreatedBySchema`
+exported as separate enums to hedge against future divergence). Also
+documents the cross-package `BrandSchema.parse(...)` probe and what
+Phase 1 explicitly does *not* include (Drizzle schema, curation UI,
+Yjs/CRDT, prompt assembly, validators).
+
+### Verification
+
+All green on a fresh install:
+
+```
+pnpm install       ✔
+pnpm lint          ✔  0 problems
+pnpm typecheck     ✔  9/9 workspaces pass
+pnpm format:check  ✔
+```
+
+End-to-end probe: `BrandSchema.parse(...)` round-trips from both
+`packages/server/src/index.ts` and `packages/web/src/index.ts` against
+a literal payload, typed with the inferred `Brand`. Probe reverted after
+verification — the runtime code still lives only in `packages/shared`.
 
 ---
 
