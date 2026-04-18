@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { CanvasBlockIdSchema, CanvasIdSchema, PinIdSchema, ProjectIdSchema } from '../ids'
+import { CanvasBlockIdSchema, CanvasIdSchema, ProjectIdSchema } from '../ids'
 import { ProseMirrorDocSchema } from '../json'
 
 export const CanvasSchema = z.object({
@@ -11,8 +11,11 @@ export const CanvasSchema = z.object({
 
 export type Canvas = z.infer<typeof CanvasSchema>
 
-export const CanvasBlockKindSchema = z.enum(['text', 'image', 'file', 'snippet'])
+export const CanvasBlockKindSchema = z.enum(['text', 'image', 'file'])
 export type CanvasBlockKind = z.infer<typeof CanvasBlockKindSchema>
+
+export const CanvasBlockCreatedBySchema = z.enum(['user', 'agent'])
+export type CanvasBlockCreatedBy = z.infer<typeof CanvasBlockCreatedBySchema>
 
 const CanvasBlockBaseShape = {
   id: CanvasBlockIdSchema,
@@ -20,6 +23,10 @@ const CanvasBlockBaseShape = {
   // Integer position for deterministic ordering. Same rationale as
   // guideline-section priority — sparse integers, re-balance on conflict.
   position: z.number().int(),
+  isPinned: z.boolean(),
+  pinnedAt: z.iso.datetime().nullable(),
+  createdBy: CanvasBlockCreatedBySchema,
+  deletedAt: z.iso.datetime().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 }
@@ -53,40 +60,18 @@ export const FileCanvasBlockSchema = z.object({
 
 export type FileCanvasBlock = z.infer<typeof FileCanvasBlockSchema>
 
-export const SnippetCanvasBlockSchema = z.object({
-  ...CanvasBlockBaseShape,
-  kind: z.literal('snippet'),
-  body: ProseMirrorDocSchema,
-  sourceBlockId: CanvasBlockIdSchema.optional(),
-})
-
-export type SnippetCanvasBlock = z.infer<typeof SnippetCanvasBlockSchema>
-
 export const CanvasBlockSchema = z.discriminatedUnion('kind', [
   TextCanvasBlockSchema,
   ImageCanvasBlockSchema,
   FileCanvasBlockSchema,
-  SnippetCanvasBlockSchema,
 ])
 
 export type CanvasBlock = z.infer<typeof CanvasBlockSchema>
 
-export const PinCreatedBySchema = z.enum(['user', 'agent'])
-export type PinCreatedBy = z.infer<typeof PinCreatedBySchema>
-
-export const PinSchema = z.object({
-  id: PinIdSchema,
-  canvasId: CanvasIdSchema,
-  blockId: CanvasBlockIdSchema,
-  createdBy: PinCreatedBySchema,
-  createdAt: z.iso.datetime(),
-})
-
-export type Pin = z.infer<typeof PinSchema>
-
 // Derived projection — not a stored entity. The server computes it as a
-// filtered read over `pins` for a project; the schema exists so the wire
-// shape is typed end-to-end.
+// filtered read over active, pinned blocks for a project
+// (`is_pinned = true AND deleted_at IS NULL`); the schema exists so the
+// wire shape is typed end-to-end.
 export const ShortlistViewSchema = z.object({
   projectId: ProjectIdSchema,
   blockIds: z.array(CanvasBlockIdSchema),
