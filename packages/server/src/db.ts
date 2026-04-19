@@ -33,6 +33,17 @@ export interface Db {
   // Workspace settings
   getWorkspaceSettings: typeof db.getWorkspaceSettings
   upsertWorkspaceSettings: typeof db.upsertWorkspaceSettings
+
+  // Canvas blocks + events
+  listActiveBlocks: typeof db.listActiveBlocks
+  createBlock: typeof db.createBlock
+  setPinned: typeof db.setPinned
+  getShortlistView: typeof db.getShortlistView
+  appendCanvasEvent: typeof db.appendCanvasEvent
+
+  // Agent messages
+  listAgentMessages: typeof db.listAgentMessages
+  appendAgentMessage: typeof db.appendAgentMessage
 }
 
 export function buildDbDeps(): Db {
@@ -52,5 +63,12 @@ export function buildDbDeps(): Db {
     getCanvasByProject: db.getCanvasByProject,
     getWorkspaceSettings: db.getWorkspaceSettings,
     upsertWorkspaceSettings: db.upsertWorkspaceSettings,
+    listActiveBlocks: db.listActiveBlocks,
+    createBlock: db.createBlock,
+    setPinned: db.setPinned,
+    getShortlistView: db.getShortlistView,
+    appendCanvasEvent: db.appendCanvasEvent,
+    listAgentMessages: db.listAgentMessages,
+    appendAgentMessage: db.appendAgentMessage,
   }
 }

@@ -1,5 +1,6 @@
 import {
   ProseMirrorDocSchema,
+  type AgentMessage,
   type Brand,
   type BrandGuidelineSection,
   type BrandId,
@@ -15,6 +16,7 @@ import {
   type WorkspaceId,
 } from '@brandfactory/shared'
 import type {
+  agentMessages,
   brands,
   canvasBlocks,
   canvases,
@@ -29,6 +31,7 @@ type GuidelineSectionRow = typeof guidelineSections.$inferSelect
 type ProjectRow = typeof projects.$inferSelect
 type CanvasRow = typeof canvases.$inferSelect
 type CanvasBlockRow = typeof canvasBlocks.$inferSelect
+type AgentMessageRow = typeof agentMessages.$inferSelect
 
 // Parse JSON columns at the trust boundary on read. Writes are gated by
 // zod at route boundaries, but a corrupted row (bad migration, direct DB
@@ -104,6 +107,18 @@ export function rowToProject(row: ProjectRow) {
     throw new Error(`Standardized project ${row.id} missing templateId`)
   }
   return { ...base, kind: 'standardized' as const, templateId: row.templateId }
+}
+
+// `content` is plain text (no zod parse needed); the AgentMessage wire type
+// doesn't carry `createdAt` so we drop it here — callers that need the
+// timestamp read the row directly.
+export function rowToAgentMessage(row: AgentMessageRow): AgentMessage {
+  return {
+    kind: 'message',
+    id: row.id,
+    role: row.role,
+    content: row.content,
+  }
 }
 
 // Kind-specific columns are nullable at the DB level because one wide table

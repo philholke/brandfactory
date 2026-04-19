@@ -13,7 +13,7 @@ export function onError(err: Error, c: Context<AppEnv>): Response {
       },
       // `status` is narrowed by Hono to content-status; `satisfies` would
       // trip its conditional types, so cast through number.
-      err.status as 401 | 403 | 404 | 400 | 500,
+      err.status as 400 | 401 | 403 | 404 | 409 | 500,
     )
   }
   if (err instanceof ZodError) {

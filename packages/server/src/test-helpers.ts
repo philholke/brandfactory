@@ -3,16 +3,21 @@ import type { BlobStore } from '@brandfactory/adapter-storage'
 import type { LLMProvider } from '@brandfactory/adapter-llm'
 import type { RealtimeBus } from '@brandfactory/adapter-realtime'
 import type {
+  AgentMessage,
   Brand,
   BrandGuidelineSection,
   BrandId,
   Canvas,
+  CanvasBlock,
+  CanvasBlockId,
   Project,
   ProjectId,
+  ShortlistView,
   Workspace,
   WorkspaceId,
   WorkspaceSettings,
 } from '@brandfactory/shared'
+import { createAgentConcurrencyGuard, type AgentConcurrencyGuard } from './agent/concurrency'
 import { createApp, type AppDeps } from './app'
 import type { Db } from './db'
 import type { Env } from './env'
@@ -34,6 +39,24 @@ interface FakeUserRow {
   updatedAt: string
 }
 
+export interface FakeCanvasEventRow {
+  id: string
+  canvasId: string
+  blockId: string | null
+  op: 'add_block' | 'update_block' | 'remove_block' | 'restore_block' | 'pin' | 'unpin'
+  actor: 'user' | 'agent'
+  userId: string | null
+  payload: unknown
+  createdAt: string
+}
+
+export interface FakeAgentMessageRow {
+  message: AgentMessage
+  projectId: string
+  userId: string | null
+  createdAt: string
+}
+
 export interface FakeDbState {
   users: Map<string, FakeUserRow>
   workspaces: Map<string, Workspace>
@@ -42,6 +65,9 @@ export interface FakeDbState {
   projects: Map<string, Project>
   canvases: Map<string, Canvas>
   settings: Map<string, WorkspaceSettings>
+  canvasBlocks: Map<string, CanvasBlock>
+  canvasEvents: FakeCanvasEventRow[]
+  agentMessages: FakeAgentMessageRow[]
 }
 
 export function createFakeDbState(): FakeDbState {
@@ -53,6 +79,9 @@ export function createFakeDbState(): FakeDbState {
     projects: new Map(),
     canvases: new Map(),
     settings: new Map(),
+    canvasBlocks: new Map(),
+    canvasEvents: [],
+    agentMessages: [],
   }
 }
 
@@ -192,6 +221,116 @@ export function createFakeDb(state: FakeDbState = createFakeDbState()): {
       state.settings.set(input.workspaceId, row)
       return row
     },
+
+    async listActiveBlocks(canvasId) {
+      return [...state.canvasBlocks.values()]
+        .filter((b) => b.canvasId === canvasId && b.deletedAt === null)
+        .sort((a, b) => a.position - b.position)
+    },
+    async createBlock(input) {
+      const id = nextId('bk') as CanvasBlockId
+      const base = {
+        id,
+        canvasId: input.canvasId,
+        position: input.position,
+        isPinned: false,
+        pinnedAt: null,
+        createdBy: input.createdBy,
+        deletedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }
+      let block: CanvasBlock
+      switch (input.kind) {
+        case 'text':
+          block = { ...base, kind: 'text', body: input.body }
+          break
+        case 'image':
+          block = {
+            ...base,
+            kind: 'image',
+            blobKey: input.blobKey,
+            ...(input.alt !== undefined ? { alt: input.alt } : {}),
+            ...(input.width !== undefined ? { width: input.width } : {}),
+            ...(input.height !== undefined ? { height: input.height } : {}),
+          }
+          break
+        case 'file':
+          block = {
+            ...base,
+            kind: 'file',
+            blobKey: input.blobKey,
+            filename: input.filename,
+            mime: input.mime,
+          }
+          break
+      }
+      state.canvasBlocks.set(id, block)
+      return block
+    },
+    async setPinned(id, value) {
+      const existing = state.canvasBlocks.get(id)
+      if (!existing) throw new Error(`Block ${id} not found`)
+      const updated: CanvasBlock = {
+        ...existing,
+        isPinned: value,
+        pinnedAt: value ? NOW : null,
+        updatedAt: NOW,
+      }
+      state.canvasBlocks.set(id, updated)
+      return updated
+    },
+    async getShortlistView(projectId) {
+      const canvas = [...state.canvases.values()].find((c) => c.projectId === projectId)
+      const view: ShortlistView = {
+        projectId,
+        blockIds: canvas
+          ? [...state.canvasBlocks.values()]
+              .filter((b) => b.canvasId === canvas.id && b.isPinned && b.deletedAt === null)
+              .sort((a, b) => a.position - b.position)
+              .map((b) => b.id)
+          : [],
+      }
+      return view
+    },
+    async appendCanvasEvent(input) {
+      const row: FakeCanvasEventRow = {
+        id: nextId('ev'),
+        canvasId: input.canvasId,
+        blockId: input.blockId ?? null,
+        op: input.op,
+        actor: input.actor,
+        userId: input.userId ?? null,
+        payload: input.payload,
+        createdAt: NOW,
+      }
+      state.canvasEvents.push(row)
+      return row
+    },
+
+    async listAgentMessages(projectId, opts) {
+      const limit = opts?.limit ?? 40
+      const rows = state.agentMessages.filter((r) => r.projectId === projectId)
+      // Latest `limit` by createdAt, then re-order oldest first for the caller.
+      const latest = rows.slice(-limit)
+      return latest.map((r) => r.message)
+    },
+    async appendAgentMessage(input) {
+      const id = nextId('am')
+      const message: AgentMessage = {
+        kind: 'message',
+        id,
+        role: input.role,
+        content: input.content,
+      }
+      state.agentMessages.push({
+        message,
+        projectId: input.projectId,
+        userId: input.userId ?? null,
+        createdAt: NOW,
+      })
+      return message
+    },
   }
   return { db, state }
 }
@@ -241,7 +380,8 @@ export function createFakeAdapters(overrides: Partial<AppDeps> = {}): Omit<AppDe
   }
   const { db } = overrides.db ? { db: overrides.db } : createFakeDb()
   const auth = overrides.auth ?? createFakeAuth({})
-  return { db, auth, storage, realtime, llm }
+  const agentGuard = overrides.agentGuard ?? createAgentConcurrencyGuard()
+  return { db, auth, storage, realtime, llm, agentGuard }
 }
 
 export function testEnv(overrides: Partial<Env> = {}): Env {
@@ -276,6 +416,9 @@ export function createTestApp(
     users?: Array<{ id: string; token: string }>
     env?: Partial<Env>
     storage?: BlobStore
+    llm?: LLMProvider
+    realtime?: RealtimeBus
+    agentGuard?: AgentConcurrencyGuard
   } = {},
 ): TestHarness {
   const { db, state } = createFakeDb()
@@ -296,6 +439,9 @@ export function createTestApp(
     db,
     auth,
     ...(opts.storage ? { storage: opts.storage } : {}),
+    ...(opts.llm ? { llm: opts.llm } : {}),
+    ...(opts.realtime ? { realtime: opts.realtime } : {}),
+    ...(opts.agentGuard ? { agentGuard: opts.agentGuard } : {}),
   })
   const app = createApp({ ...adapters, env, log: silentLogger() })
   return { app, state, auth, tokens }

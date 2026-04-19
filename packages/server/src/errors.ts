@@ -44,3 +44,10 @@ export class ValidationError extends HttpError {
     this.name = 'ValidationError'
   }
 }
+
+export class ConflictError extends HttpError {
+  constructor(message = 'conflict', code = 'CONFLICT') {
+    super(409, code, message)
+    this.name = 'ConflictError'
+  }
+}

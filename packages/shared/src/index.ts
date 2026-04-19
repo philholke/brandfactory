@@ -24,6 +24,7 @@ export * from './project/create'
 
 // Agent event stream
 export * from './agent/events'
+export * from './agent/api'
 
 // Realtime wire envelope
 export * from './realtime/envelope'

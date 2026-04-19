@@ -12,13 +12,15 @@
     "lint": "eslint .",
     "test": "vitest run",
     "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts"
+    "start": "tsx src/main.ts",
+    "smoke-agent": "tsx scripts/smoke-agent.ts"
   },
   "dependencies": {
     "@brandfactory/adapter-auth": "workspace:*",
     "@brandfactory/adapter-llm": "workspace:*",
     "@brandfactory/adapter-realtime": "workspace:*",
     "@brandfactory/adapter-storage": "workspace:*",
+    "@brandfactory/agent": "workspace:*",
     "@brandfactory/db": "workspace:*",
     "@brandfactory/shared": "workspace:*",
     "@hono/node-server": "^1.13.7",

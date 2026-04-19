@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ProseMirrorDoc } from '@brandfactory/shared'
 import {
+  rowToAgentMessage,
   rowToBrand,
   rowToCanvas,
   rowToCanvasBlock,
@@ -100,6 +101,22 @@ describe('mappers — happy paths', () => {
     const block = rowToCanvasBlock(row)
     expect(block.kind).toBe('text')
     if (block.kind === 'text') expect(block.body).toEqual(TEXT_DOC)
+  })
+
+  it('rowToAgentMessage drops DB-only fields and emits the AgentMessage wire shape', () => {
+    const row = {
+      id: 'am-1',
+      projectId: 'p-1',
+      role: 'assistant' as const,
+      content: 'Hello from the model.',
+      userId: null,
+      createdAt: TS,
+    }
+    const msg = rowToAgentMessage(row)
+    expect(msg.kind).toBe('message')
+    expect(msg.id).toBe('am-1')
+    expect(msg.role).toBe('assistant')
+    expect(msg.content).toBe('Hello from the model.')
   })
 
   it('rowToCanvasBlock image variant includes optional dims', () => {

@@ -11,6 +11,8 @@ import { createAuthMiddleware, createOptionalAuthMiddleware } from './middleware
 import { onError } from './middleware/error'
 import { loggerMiddleware } from './middleware/logger'
 import { requestIdMiddleware } from './middleware/request-id'
+import type { AgentConcurrencyGuard } from './agent/concurrency'
+import { createAgentRouter } from './routes/agent'
 import { createBlobsRouter } from './routes/blobs'
 import { createBrandsRouter, createWorkspaceBrandsRouter } from './routes/brands'
 import { createHealthRouter } from './routes/health'
@@ -27,6 +29,7 @@ export interface AppDeps {
   storage: BlobStore
   realtime: RealtimeBus
   llm: LLMProvider
+  agentGuard: AgentConcurrencyGuard
 }
 
 export function createApp(deps: AppDeps) {
@@ -58,6 +61,16 @@ export function createApp(deps: AppDeps) {
     .route('/brands', createBrandsRouter({ db: deps.db }))
     .route('/brands', createBrandProjectsRouter({ db: deps.db }))
     .route('/projects', createProjectsRouter({ db: deps.db }))
+    .route(
+      '/projects',
+      createAgentRouter({
+        db: deps.db,
+        env: deps.env,
+        llm: deps.llm,
+        realtime: deps.realtime,
+        agentGuard: deps.agentGuard,
+      }),
+    )
 
   if (deps.env.STORAGE_PROVIDER === 'local-disk') {
     // Blob routes are not auth-gated — the signed URL is the capability.

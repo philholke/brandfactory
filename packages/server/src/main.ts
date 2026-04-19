@@ -3,6 +3,7 @@ import { pool } from '@brandfactory/db'
 import 'dotenv/config'
 import type { Server as HttpServer } from 'node:http'
 import { buildAdapters } from './adapters'
+import { createAgentConcurrencyGuard } from './agent/concurrency'
 import { createApp } from './app'
 import { buildDbDeps } from './db'
 import { loadEnv } from './env'
@@ -17,6 +18,7 @@ async function main(): Promise<void> {
   // The Hono app only ever needs the pub/sub surface, so it takes the bus
   // out of the discriminated `RealtimeAdapter` here. The provider-specific
   // node-ws binder stays narrowed below.
+  const agentGuard = createAgentConcurrencyGuard()
   const app = createApp({
     env,
     log,
@@ -25,6 +27,7 @@ async function main(): Promise<void> {
     storage: adapters.storage,
     realtime: adapters.realtime.bus,
     llm: adapters.llm,
+    agentGuard,
   })
 
   const server = serve(
