@@ -5,6 +5,7 @@ below, with full detail further down.
 
 ## Index
 
+- **0.6.1** — 2026-04-19 — Pre-Phase-6 hardening: realtime WS heartbeat, `verifySignature` clock-skew tolerance, `ProseMirrorDocSchema` parse on DB reads, `@brandfactory/db` vitest suite, `userId` in server error logs. 120 tests (+14).
 - **0.6.0** — 2026-04-19 — Phase 5: `@brandfactory/agent` ships `streamResponse` over an injected `CanvasOpApplier`, plus a four-item hardening pass (realtime subscribe race, `BLOB_MAX_BYTES` 413, two LOW cleanups). 106 tests.
 - **0.5.1** — 2026-04-19 — Post-Phase-4 cleanup: project+canvas tx helper, `LLMProviderId` single-sourced in shared, trust-boundary validation on `workspace_settings`, discriminated `RealtimeAdapter` (no `as` cast in `main.ts`), `BlobNotFoundError` `instanceof`, atomic `updateBrandGuidelines` helper.
 - **0.5.0** — 2026-04-19 — Phase 4: `@brandfactory/server` ships a bootable Hono-on-`@hono/node-server` HTTP surface with WS upgrade at `/rt`, conditional `/blobs` mount, request-id → logger → auth → validator → handler → onError middleware chain, six route modules, `workspace_settings` table, and 49 new vitest cases (83 total).
@@ -13,6 +14,210 @@ below, with full detail further down.
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.6.1 — 2026-04-19
+
+Hardening pass surfaced by a repo-wide review after Phase 5 landed,
+sized to close the gaps Phase 6's `POST /projects/:id/agent` route
+would otherwise trip over. Five items: one HIGH (long-lived WS
+connection leak), three MEDIUM (storage clock skew, JSON trust
+boundary on DB reads, `@brandfactory/db` had zero vitest coverage),
+one LOW polish (server error log missed `userId`). No new feature
+surface. `pnpm test` grew from 106 (0.6.0) to 120 (+14: +12 mapper
+unit tests in `@brandfactory/db`, +1 realtime zombie-socket test,
++1 storage clock-skew test); typecheck, lint, format clean across 9
+workspaces.
+
+### HIGH — realtime WS heartbeat (zombie socket sweep)
+
+`@brandfactory/adapter-realtime`'s native-ws bus had no heartbeat,
+ping/pong, or connection timeout. A client that vanishes without
+sending a close frame (tab suspended, laptop lid closed, network
+drop, mobile app killed) leaves the socket half-open on the server:
+`socket.send(...)` succeeds into a dead TCP buffer, the `close`
+handler never runs, and the subscription map holds the handler
+forever. Over a production deployment's uptime that's a memory leak
+and a silent event-delivery hole — and Phase 6 is exactly the
+workload that fans events to long-lived subscribers, so we fix it
+before the route lands.
+
+- **`packages/adapters/realtime/src/native-ws.ts`** — `BindOptions`
+  grows an optional `heartbeatIntervalMs` (default 30 000, matching
+  common ws deployments). In `bindToNodeWebSocketServer`:
+  - On each `'connection'`: tag the socket `isAlive = true`, attach a
+    `'pong'` listener that re-tags it `true`.
+  - A `setInterval(sweep, intervalMs)` iterates `wss.clients`: any
+    socket with `isAlive === false` (i.e. didn't pong since the
+    previous tick) gets `socket.terminate()`; the rest are flipped
+    to `false` and sent a `socket.ping()`. Terminate forces the
+    'close' handler to run, which releases the socket's
+    subscriptions via the existing unsubscribe map.
+  - `heartbeat.unref()` so the interval doesn't block process
+    shutdown, and `wss.on('close', () => clearInterval(heartbeat))`
+    cleans up in test harnesses that spin up many ephemeral buses.
+- **`packages/adapters/realtime/src/native-ws.test.ts`** — new
+  `terminates zombie sockets…` case drives the sweep with
+  `heartbeatIntervalMs: 40` and overrides the client's `pong`
+  method to a no-op so `ws`'s auto-pong never actually writes
+  bytes. The server sees no reply, terminates on the second tick,
+  and the client observes the close event within the safety
+  timeout. Harness extended to plumb the option through `startBus`.
+- **Interval sizing.** 30 s is standard; halving it doubles the
+  ping volume without meaningfully improving eviction latency.
+  Kept configurable so Phase 6's production deployment (or ops
+  folks tuning for mobile clients) can override without a code
+  change.
+
+### MEDIUM — storage clock-skew tolerance on `verifySignature`
+
+`verifySignature` compared `exp >= now` with zero tolerance. A
+client a handful of seconds ahead of the server would get a
+spurious 403 on an otherwise-valid URL — operationally fragile in
+multi-host deploys without tight NTP. Not a security property
+loss: the signature itself is still HMAC-verified in constant
+time; the skew only widens the expiry check.
+
+- **`packages/adapters/storage/src/local-disk.ts`** — exports new
+  `CLOCK_SKEW_TOLERANCE_SECONDS = 10` and `VerifySignatureInput`
+  grows an optional `clockSkewSeconds`. The expiry check becomes
+  `input.exp + skew >= now` (still `Number.isFinite`-guarded so a
+  nonsense exp can't exploit the tolerance). Timing-safe compare
+  path unchanged: HMAC is computed and compared before the expiry
+  decision, so the two failure modes remain indistinguishable via
+  response timing.
+- **`packages/adapters/storage/src/local-disk.test.ts`** — new
+  `verify tolerates a client clock a few seconds ahead of exp`
+  case asserts both sides: a `now` 5 s past exp passes (within
+  tolerance), a `now` 15 s past exp throws (beyond it). The
+  existing `verify rejects an expired signature` case updated to
+  use `now - 30` so it's unambiguously outside the 10 s window.
+- **`packages/server/src/routes/blobs.test.ts`** — mirroring
+  update to the server's `expired signature → 403` case for the
+  same reason.
+- **Why 10 s.** Enough to absorb NTP drift and the typical
+  network latency between signer and verifier; short enough that
+  an attacker replaying a just-expired URL doesn't get a
+  meaningful extension. Exposed as an input so deployments with
+  unusually loose clock sync (or unusually strict requirements)
+  can override per call.
+
+### MEDIUM — `ProseMirrorDocSchema` parse on DB reads
+
+`@brandfactory/db/src/mappers.ts` blind-cast `row.body as
+ProseMirrorDoc` in both `rowToGuidelineSection` and
+`rowToCanvasBlock`'s text arm. Writes are gated by zod at the
+route layer today, but Phase 6 adds a new writer — the agent's
+`add_canvas_block` tool — and a corrupted row (bad migration,
+direct-DB edit, historical data) would otherwise propagate
+silently into prompt assembly, canvas-op fan-out, or the wire
+DTO. Moving the parse into the mapper closes the trust boundary
+on reads too.
+
+- **`packages/db/src/mappers.ts`** — imports shift to a value
+  import of `ProseMirrorDocSchema` (keeping the type imports
+  colocated via `type` in the mixed import list). New module-local
+  `parseProseMirrorBody(body, rowId)` runs `safeParse` and throws
+  `Row <id> has malformed ProseMirror body` on failure — a
+  data-integrity bug worth failing loud on, consistent with the
+  existing missing-field throws for image/file rows.
+  `rowToGuidelineSection` and the text case of `rowToCanvasBlock`
+  both call it.
+- Consistent error shape: the existing `throw new Error(...)`
+  messages on missing `blobKey` / `filename` / `mime` / `templateId`
+  are the model, and the new check reads the same way. The server's
+  `onError` middleware already catches these as unhandled → 500,
+  which is the right surface for "the DB gave us something
+  malformed." If Phase 6 ever wants a typed domain-error variant,
+  the single call site is the hook.
+
+### MEDIUM — `@brandfactory/db` vitest suite
+
+Before this pass the package shipped `scripts/smoke.ts` (live-DB,
+manual) and zero `vitest` coverage. That was fine at Phase 2 when
+the schema was new and the query helpers were trivial, less fine
+now that mappers enforce invariants and Phase 6's applier will
+write through multiple transactional helpers. The mapper layer is
+pure (JSON in, domain object out) — ideal for fast unit tests that
+run on every `pnpm test` without needing Postgres.
+
+- **`packages/db/package.json`** — adds `vitest ^2.1.8` devDep
+  and a `test: vitest run` script, matching every other package.
+- **`packages/db/vitest.config.ts`** — projects-mode entry,
+  mirrors the adapters and agent packages so
+  `pnpm --filter @brandfactory/db test` behaves identically to the
+  root `pnpm test`.
+- **Root `vitest.config.ts`** — `packages/db` appended to the
+  `projects` list.
+- **`packages/db/src/mappers.test.ts`** — 12 new cases, no
+  database, all deterministic:
+  - Happy paths for `rowToWorkspace`, `rowToBrand`, `rowToCanvas`,
+    `rowToGuidelineSection`, `rowToProject` (both `freeform` and
+    `standardized` variants), and `rowToCanvasBlock` (text and
+    image with optional dims).
+  - Data-integrity failures fail loud:
+    `rowToGuidelineSection` and `rowToCanvasBlock(text)` throw on
+    a malformed body (input is a `Map` to simulate a non-JSON
+    serialized artifact); `rowToProject` throws on standardized +
+    null `templateId`; `rowToCanvasBlock` throws on image without
+    `blobKey` and file without `filename`.
+- **Live-DB integration tests deferred** for this pass — the
+  existing `scripts/smoke.ts` already walks the full lifecycle
+  against real Postgres (users → workspace → brand → sections →
+  project+canvas → blocks → events → shortlist → soft-delete →
+  settings), and promoting it to a gated vitest suite is a
+  mechanical refactor that can ride with Phase 6 where a live
+  Postgres harness will already be in scope for the applier route
+  tests.
+
+### LOW — `userId` in the server's unhandled-error log context
+
+`packages/server/src/middleware/error.ts:29` already logged
+`{ name, message, stack }` on an unhandled error, and the logger is
+bound with `requestId` on middleware entry — but `c.var.userId`
+was not propagated. That made tracing production incidents harder:
+`requestId` correlates across a single request, `userId`
+correlates across a session.
+
+- **`packages/server/src/middleware/error.ts`** — reads
+  `c.get('userId')` and spreads `{ userId }` into the log fields
+  when defined (skipped cleanly on unauthenticated paths). One
+  line-net change; no test required since the existing
+  `error.test.ts` covers the unhandled path and the log is a
+  diagnostic side effect.
+
+### Deliberately deferred
+
+Surfaced by the same review, kept out of scope for this pass by
+design:
+
+- **`projects.template_id` CHECK constraint.** The mappers
+  already throw on a standardized row with null `templateId`
+  (defense-in-depth landed in Phase 5). A DB-level `CHECK (kind
+  = 'freeform' OR template_id IS NOT NULL)` adds a second rail,
+  but lands cleanest via a `drizzle-kit generate` round-trip
+  against a live DB — not worth hand-authoring the migration +
+  snapshot drift. Ride with the next planned migration.
+- **Model-id whitelist in `@brandfactory/adapter-llm`.** Only
+  load-bearing once runtime overrides from the settings route
+  reach arbitrary strings; today the settings route validates
+  against the shared `LLMProviderIdSchema` and the model id comes
+  from the same trust boundary as the provider.
+- **Brand name / description prompt-injection sanitation in
+  `buildSystemPrompt`.** Real risk is low (a user only authors
+  their own brand), and any hardening belongs at the create-time
+  validation boundary rather than the prompt-assembly layer.
+
+### Verification
+
+```
+pnpm install        ✔  lockfile updated (vitest added to @brandfactory/db)
+pnpm typecheck      ✔  9/9 workspaces pass
+pnpm lint           ✔  clean
+pnpm format:check   ✔  clean
+pnpm test           ✔  120 tests passing (25 files) — up from 106
+```
 
 ---
 

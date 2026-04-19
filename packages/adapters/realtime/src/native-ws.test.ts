@@ -20,13 +20,19 @@ afterEach(async () => {
 })
 
 async function startBus(
-  opts: { authenticate?: (req: unknown) => string | null } = {},
+  opts: {
+    authenticate?: (req: unknown) => string | null
+    heartbeatIntervalMs?: number
+  } = {},
 ): Promise<Harness> {
   const bus = createNativeWsRealtimeBus()
   const http = createServer()
   const wss = new WebSocketServer({ server: http })
   bus.bindToNodeWebSocketServer(wss, {
     authenticate: opts.authenticate ?? (() => 'user-1'),
+    ...(opts.heartbeatIntervalMs !== undefined
+      ? { heartbeatIntervalMs: opts.heartbeatIntervalMs }
+      : {}),
   })
   await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
   const addr = http.address()
@@ -165,6 +171,27 @@ describe('native-ws realtime bus', () => {
     expect(authorizeCalls).toBe(1)
     expect(received).toHaveLength(1)
     c.close()
+  })
+
+  it('terminates zombie sockets that stop responding to pings', async () => {
+    // Simulate a client that opens, then stops responding (tab suspended,
+    // wifi drop). `ws` auto-pongs on every received ping; overriding the
+    // client's `pong` method makes the reply a no-op, so the server sees
+    // no response and — after missing two sweep ticks — `terminate()`s the
+    // zombie. Without the heartbeat, that socket would live indefinitely
+    // and subscriptions would never be released.
+    const { url } = await startBus({ heartbeatIntervalMs: 40 })
+    const c = await makeClient(url)
+    ;(c as unknown as { pong: (...args: unknown[]) => void }).pong = () => {}
+
+    const closed = await new Promise<boolean>((resolve) => {
+      c.once('close', () => resolve(true))
+      // Safety timeout so a regression doesn't hang the test forever.
+      setTimeout(() => resolve(false), 500)
+    })
+
+    expect(closed).toBe(true)
+    expect(c.readyState).toBe(WebSocket.CLOSED)
   })
 
   it('rejects connections that fail authentication', async () => {

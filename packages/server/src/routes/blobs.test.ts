@@ -72,7 +72,8 @@ describe('blobs routes', () => {
     const { store } = buildStorage()
     const { app } = createTestApp({ storage: store })
     const key = 'e.txt'
-    const exp = Math.floor(Date.now() / 1000) - 1 // already expired
+    // 30s in the past is well outside the 10s clock-skew tolerance window.
+    const exp = Math.floor(Date.now() / 1000) - 30
     const sig = sign('GET', key, exp, SECRET)
     const res = await app.request(`/blobs/${key}?exp=${exp}&sig=${sig}`)
     expect(res.status).toBe(403)

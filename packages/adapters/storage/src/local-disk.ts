@@ -92,7 +92,14 @@ export interface VerifySignatureInput {
   sig: string
   signingSecret: string
   now?: number
+  // Seconds of tolerance applied to the expiry check. Server and client
+  // clocks drift — without a buffer, a client a handful of seconds ahead
+  // of the server gets a spurious 401 on an otherwise-valid URL. Defaults
+  // to `CLOCK_SKEW_TOLERANCE_SECONDS`; set to 0 to require exact alignment.
+  clockSkewSeconds?: number
 }
+
+export const CLOCK_SKEW_TOLERANCE_SECONDS = 10
 
 // Reused by the server's blob HTTP handler (Phase 4) to check signed URLs.
 // Throws InvalidSignatureError on any failure. Always does the full HMAC
@@ -100,6 +107,7 @@ export interface VerifySignatureInput {
 // remote observer can't distinguish the two via response timing.
 export function verifySignature(input: VerifySignatureInput): void {
   const now = input.now ?? Math.floor(Date.now() / 1000)
+  const skew = input.clockSkewSeconds ?? CLOCK_SKEW_TOLERANCE_SECONDS
   const expected = createHmac('sha256', input.signingSecret)
     .update(`${input.method}\n${input.key}\n${input.exp}`)
     .digest()
@@ -111,7 +119,7 @@ export function verifySignature(input: VerifySignatureInput): void {
   const provided = Buffer.alloc(expected.length)
   rawProvided.copy(provided, 0, 0, Math.min(rawProvided.length, expected.length))
   const sigOk = timingSafeEqual(provided, expected) && rawProvided.length === expected.length
-  const notExpired = Number.isFinite(input.exp) && input.exp >= now
+  const notExpired = Number.isFinite(input.exp) && input.exp + skew >= now
   if (!sigOk || !notExpired) {
     throw new InvalidSignatureError('invalid signature')
   }

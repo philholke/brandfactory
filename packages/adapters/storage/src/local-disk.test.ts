@@ -60,7 +60,8 @@ describe('local-disk blob store', () => {
   })
 
   it('verify rejects an expired signature', () => {
-    const expiredExp = Math.floor(Date.now() / 1000) - 10
+    // 30s in the past is well outside the clock-skew tolerance window.
+    const expiredExp = Math.floor(Date.now() / 1000) - 30
     expect(() =>
       verifySignature({
         method: 'GET',
@@ -68,6 +69,39 @@ describe('local-disk blob store', () => {
         exp: expiredExp,
         sig: 'deadbeef',
         signingSecret: SECRET,
+      }),
+    ).toThrow(InvalidSignatureError)
+  })
+
+  it('verify tolerates a client clock a few seconds ahead of exp', async () => {
+    // Client wall-clock is 5s ahead of the server. Signature is valid; exp
+    // is a hair in the past from the server's perspective. Within the 10s
+    // default skew, verification still passes.
+    const store = makeStore()
+    const url = await store.getSignedReadUrl('skewed.png', { ttlSeconds: 60 })
+    const parsed = new URL(url)
+    const exp = Number(parsed.searchParams.get('exp'))
+    const sig = parsed.searchParams.get('sig') ?? ''
+    expect(() =>
+      verifySignature({
+        method: 'GET',
+        key: 'skewed.png',
+        exp,
+        sig,
+        signingSecret: SECRET,
+        now: exp + 5, // 5s past exp
+      }),
+    ).not.toThrow()
+
+    // Past the tolerance window, it rejects.
+    expect(() =>
+      verifySignature({
+        method: 'GET',
+        key: 'skewed.png',
+        exp,
+        sig,
+        signingSecret: SECRET,
+        now: exp + 15, // 15s past exp > 10s tolerance
       }),
     ).toThrow(InvalidSignatureError)
   })

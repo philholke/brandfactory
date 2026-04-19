@@ -8,11 +8,17 @@ export interface BindOptions {
   authenticate: (req: IncomingMessage) => Promise<string | null> | string | null
   // Optional gate to authorize a (userId, channel) pair before subscribing.
   authorize?: (ctx: { userId: string; channel: string }) => Promise<boolean> | boolean
+  // Heartbeat interval. Every tick the bus pings each live socket; sockets
+  // that didn't pong since the previous tick are `terminate()`d. Defaults
+  // to 30s — override in tests to force a faster sweep.
+  heartbeatIntervalMs?: number
 }
 
 export interface NativeWsRealtimeBus extends RealtimeBus {
   bindToNodeWebSocketServer(wss: WebSocketServer, opts: BindOptions): void
 }
+
+const DEFAULT_HEARTBEAT_MS = 30_000
 
 export function createNativeWsRealtimeBus(): NativeWsRealtimeBus {
   const channels = new Map<string, Set<RealtimeHandler>>()
@@ -46,7 +52,39 @@ export function createNativeWsRealtimeBus(): NativeWsRealtimeBus {
   }
 
   function bindToNodeWebSocketServer(wss: WebSocketServer, opts: BindOptions): void {
+    // Heartbeat sweep: zombie sockets (client vanished without a close
+    // frame — network drop, mobile suspend, browser crash) pile up
+    // otherwise and we'd keep fanning events into dead send buffers.
+    // Each live socket tags itself alive on `pong`; any socket that didn't
+    // pong between two ticks gets `terminate()`d so its `close` handler
+    // runs and clears its subscriptions.
+    const intervalMs = opts.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_MS
+    const heartbeat = setInterval(() => {
+      for (const socket of wss.clients) {
+        const tagged = socket as WebSocket & { isAlive?: boolean }
+        if (tagged.isAlive === false) {
+          socket.terminate()
+          continue
+        }
+        tagged.isAlive = false
+        try {
+          socket.ping()
+        } catch {
+          // send buffer full or socket already torn down; next sweep evicts.
+        }
+      }
+    }, intervalMs)
+    // Node keeps the process alive as long as any timer is pending; the
+    // heartbeat is infrastructural, not work, so unref it.
+    heartbeat.unref()
+    wss.on('close', () => clearInterval(heartbeat))
+
     wss.on('connection', (socket: WebSocket, req: IncomingMessage) => {
+      const tagged = socket as WebSocket & { isAlive?: boolean }
+      tagged.isAlive = true
+      socket.on('pong', () => {
+        tagged.isAlive = true
+      })
       void onConnection(socket, req, opts)
     })
   }

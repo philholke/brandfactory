@@ -1,17 +1,18 @@
-import type {
-  Brand,
-  BrandGuidelineSection,
-  BrandId,
-  Canvas,
-  CanvasBlock,
-  CanvasBlockId,
-  CanvasId,
-  ProjectId,
-  ProseMirrorDoc,
-  SectionId,
-  UserId,
-  Workspace,
-  WorkspaceId,
+import {
+  ProseMirrorDocSchema,
+  type Brand,
+  type BrandGuidelineSection,
+  type BrandId,
+  type Canvas,
+  type CanvasBlock,
+  type CanvasBlockId,
+  type CanvasId,
+  type ProjectId,
+  type ProseMirrorDoc,
+  type SectionId,
+  type UserId,
+  type Workspace,
+  type WorkspaceId,
 } from '@brandfactory/shared'
 import type {
   brands,
@@ -28,6 +29,19 @@ type GuidelineSectionRow = typeof guidelineSections.$inferSelect
 type ProjectRow = typeof projects.$inferSelect
 type CanvasRow = typeof canvases.$inferSelect
 type CanvasBlockRow = typeof canvasBlocks.$inferSelect
+
+// Parse JSON columns at the trust boundary on read. Writes are gated by
+// zod at route boundaries, but a corrupted row (bad migration, direct DB
+// edit, historical data) would otherwise propagate silently into prompt
+// assembly, canvas-op fan-out, or the wire. A bad doc here is a
+// data-integrity bug worth failing loud on.
+function parseProseMirrorBody(body: unknown, blockOrSectionId: string): ProseMirrorDoc {
+  const result = ProseMirrorDocSchema.safeParse(body)
+  if (!result.success) {
+    throw new Error(`Row ${blockOrSectionId} has malformed ProseMirror body`)
+  }
+  return result.data
+}
 
 export function rowToWorkspace(row: WorkspaceRow): Workspace {
   return {
@@ -55,7 +69,7 @@ export function rowToGuidelineSection(row: GuidelineSectionRow): BrandGuidelineS
     id: row.id as SectionId,
     brandId: row.brandId as BrandId,
     label: row.label,
-    body: row.body as ProseMirrorDoc,
+    body: parseProseMirrorBody(row.body, row.id),
     priority: row.priority,
     createdBy: row.createdBy,
     createdAt: row.createdAt,
@@ -110,7 +124,7 @@ export function rowToCanvasBlock(row: CanvasBlockRow): CanvasBlock {
   }
   switch (row.kind) {
     case 'text':
-      return { ...base, kind: 'text', body: row.body as ProseMirrorDoc }
+      return { ...base, kind: 'text', body: parseProseMirrorBody(row.body, row.id) }
     case 'image': {
       if (!row.blobKey) throw new Error(`Image block ${row.id} missing blobKey`)
       return {

@@ -27,10 +27,12 @@ export function onError(err: Error, c: Context<AppEnv>): Response {
     )
   }
   const log = c.get('log')
+  const userId = c.get('userId')
   log?.error('unhandled error', {
     name: err.name,
     message: err.message,
     stack: err.stack,
+    ...(userId !== undefined ? { userId } : {}),
   })
   return c.json(
     {

@@ -12,6 +12,7 @@ export default defineConfig({
       'packages/adapters/realtime',
       'packages/adapters/llm',
       'packages/agent',
+      'packages/db',
       'packages/server',
     ],
   },
