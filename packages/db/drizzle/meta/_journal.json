@@ -8,6 +8,13 @@
       "when": 1776508916873,
       "tag": "0000_eager_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776588580036,
+      "tag": "0001_shocking_the_watchers",
+      "breakpoints": true
     }
   ]
 }

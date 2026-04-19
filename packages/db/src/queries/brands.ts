@@ -112,3 +112,59 @@ export async function reorderSections(
     return rows.map(rowToGuidelineSection)
   })
 }
+
+// Atomic upsert + reorder for the guidelines PATCH endpoint. Loops the
+// inputs inside a single tx so a mid-list failure leaves the brand intact
+// instead of half-updated. Returns the final section list ordered by
+// priority — same shape as `listSectionsByBrand`.
+export interface UpdateBrandGuidelinesSectionInput {
+  id?: SectionId
+  label: string
+  body: ProseMirrorDoc
+  priority: number
+  createdBy: GuidelineSectionCreatedBy
+}
+
+export async function updateBrandGuidelines(
+  brandId: BrandId,
+  sections: UpdateBrandGuidelinesSectionInput[],
+): Promise<BrandGuidelineSection[]> {
+  return db.transaction(async (tx) => {
+    for (const section of sections) {
+      if (section.id) {
+        const [row] = await tx
+          .update(guidelineSections)
+          .set({
+            label: section.label,
+            body: section.body,
+            priority: section.priority,
+            createdBy: section.createdBy,
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(guidelineSections.id, section.id), eq(guidelineSections.brandId, brandId)))
+          .returning({ id: guidelineSections.id })
+        if (!row) {
+          throw new Error(`Section ${section.id} not found in brand ${brandId}`)
+        }
+      } else {
+        const [row] = await tx
+          .insert(guidelineSections)
+          .values({
+            brandId,
+            label: section.label,
+            body: section.body,
+            priority: section.priority,
+            createdBy: section.createdBy,
+          })
+          .returning({ id: guidelineSections.id })
+        if (!row) throw new Error('updateBrandGuidelines: insert returned no row')
+      }
+    }
+    const rows = await tx
+      .select()
+      .from(guidelineSections)
+      .where(eq(guidelineSections.brandId, brandId))
+      .orderBy(guidelineSections.priority)
+    return rows.map(rowToGuidelineSection)
+  })
+}

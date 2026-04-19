@@ -22,11 +22,13 @@ import {
   createUser,
   createWorkspace,
   getShortlistView,
+  getWorkspaceSettings,
   listBlockEvents,
   pool,
   setPinned,
   softDeleteBlock,
   upsertSection,
+  upsertWorkspaceSettings,
 } from '../src'
 import type {
   BrandId,
@@ -157,6 +159,24 @@ async function main() {
   const shortlistAfter = await getShortlistView(project.id as ProjectId)
   assertEqual(shortlistAfter.blockIds.length, 0, 'shortlist should be empty after soft-delete')
   console.log(`  shortlist  []`)
+
+  // Workspace settings: null before write, then upsert + read-back
+  const settingsBefore = await getWorkspaceSettings(workspace.id as WorkspaceId)
+  assertEqual(settingsBefore, null, 'settings should be null before upsert')
+  const settingsAfter = await upsertWorkspaceSettings({
+    workspaceId: workspace.id as WorkspaceId,
+    llmProviderId: 'anthropic',
+    llmModel: 'claude-sonnet-4-6',
+  })
+  assertEqual(settingsAfter.llmProviderId, 'anthropic', 'settings provider should persist')
+  assertEqual(settingsAfter.llmModel, 'claude-sonnet-4-6', 'settings model should persist')
+  const settingsUpdated = await upsertWorkspaceSettings({
+    workspaceId: workspace.id as WorkspaceId,
+    llmProviderId: 'openai',
+    llmModel: 'gpt-4o-mini',
+  })
+  assertEqual(settingsUpdated.llmProviderId, 'openai', 'settings upsert should replace provider')
+  console.log(`  settings   ${settingsUpdated.llmProviderId}/${settingsUpdated.llmModel}`)
 
   // listBlockEvents: [add_block, pin, remove_block] in order
   const blockEvents = await listBlockEvents(block.id as CanvasBlockId)

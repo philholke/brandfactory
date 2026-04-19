@@ -15,6 +15,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^1.0.6",
     "@ai-sdk/openai": "^1.0.11",
+    "@brandfactory/shared": "workspace:*",
     "@openrouter/ai-sdk-provider": "^0.0.6",
     "ai": "^4.0.20",
     "ollama-ai-provider": "^1.1.0"

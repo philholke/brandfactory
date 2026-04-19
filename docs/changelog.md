@@ -5,11 +5,500 @@ below, with full detail further down.
 
 ## Index
 
+- **0.5.1** — 2026-04-19 — Post-Phase-4 cleanup: project+canvas tx helper, `LLMProviderId` single-sourced in shared, trust-boundary validation on `workspace_settings`, discriminated `RealtimeAdapter` (no `as` cast in `main.ts`), `BlobNotFoundError` `instanceof`, atomic `updateBrandGuidelines` helper.
+- **0.5.0** — 2026-04-19 — Phase 4: `@brandfactory/server` ships a bootable Hono-on-`@hono/node-server` HTTP surface with WS upgrade at `/rt`, conditional `/blobs` mount, request-id → logger → auth → validator → handler → onError middleware chain, six route modules, `workspace_settings` table, and 49 new vitest cases (83 total).
 - **0.4.1** — 2026-04-19 — Pre-Phase-4 cleanup: tighter env exhaustiveness, server-grade ESLint (type-aware with `no-floating-promises`), timing-safe `verifySignature`, RFC-4122 v4 UUID regex, `createCanvas` helper, three new env tests, architecture doc drift fixed.
 - **0.4.0** — 2026-04-19 — Phase 3: four `@brandfactory/adapter-*` packages land with ports + default impls, `@brandfactory/server` gains `loadEnv()` + `buildAdapters()`, vitest stands up across the repo with 31 unit tests green.
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.5.1 — 2026-04-19
+
+Cleanup pass surfaced by a repo-wide review after Phase 4 landed. Six
+correctness / type-system / boundary tightenings, no new feature
+surface. `pnpm test` holds at 83 tests (the existing route coverage
+already exercised every changed path; behaviour parity preserved);
+typecheck, lint, format clean across 9 workspaces.
+
+### Project + canvas — atomic creation in one transaction
+
+- **`packages/db/src/queries/projects.ts`** — new
+  `createProjectWithCanvas(input): Promise<{ project; canvas }>` runs
+  both inserts inside `db.transaction`. Mirrors the existing
+  `CreateProjectInput` discriminator. Phase 4 ran the two inserts
+  back-to-back; a mid-write failure orphaned the project and surfaced
+  as a 500 with no canvas. Phase 5's agent will create projects
+  programmatically — fix-before-it-bites.
+- **`packages/server/src/db.ts`** — `Db` facade now exposes
+  `createProjectWithCanvas` and drops the standalone `createProject`
+  / `createCanvas` (the route was the only consumer; the lower-level
+  helpers stay on the `@brandfactory/db` surface for the smoke
+  script).
+- **`packages/server/src/routes/projects.ts`** — POST
+  `/brands/:brandId/projects` calls the new helper and destructures
+  `{ project }` so the response body is unchanged.
+- **`packages/server/src/test-helpers.ts`** — fake
+  `createProjectWithCanvas` writes both maps in one shot; signatures
+  match the real helper.
+- **`packages/server/src/{authz,ws}.test.ts`** — seed helpers updated
+  to use `createProjectWithCanvas` (drift here would have failed
+  compile after the facade change).
+
+### `LLMProviderId` — single source of truth in shared
+
+The four-provider tuple was redeclared in three places (shared's
+`workspace/settings.ts` schema, adapter-llm's `port.ts` union,
+server's `env.ts` const tuple). The server's `as const satisfies
+readonly LLMProviderId[]` caught server↔adapter drift, but a
+divergent shared schema would have shipped silently and Phase 5's
+agent reads `resolveLLMSettings` — a drifted shared schema could
+emit a wrong `llmProviderId` value through the wire DTO.
+
+- **New: `packages/shared/src/llm/provider-ids.ts`** — owns
+  `LLM_PROVIDER_IDS` (the const tuple), `LLMProviderIdSchema =
+  z.enum(LLM_PROVIDER_IDS)`, and `type LLMProviderId =
+  z.infer<...>`. Single source.
+- **`packages/shared/src/index.ts`** — barrel exports the new
+  module.
+- **`packages/shared/src/workspace/settings.ts`** — drops its local
+  `z.enum([...])` declaration; imports `LLMProviderIdSchema` from
+  `../llm/provider-ids`. The `WorkspaceSettings`,
+  `UpdateWorkspaceSettingsInput`, and
+  `ResolvedWorkspaceSettings` schemas keep their existing names
+  and shapes.
+- **`packages/adapters/llm/src/port.ts`** — drops its local
+  string-literal union; re-exports `LLMProviderId` from
+  `@brandfactory/shared` so existing call sites
+  (`import { LLMProviderId } from '@brandfactory/adapter-llm'`)
+  keep working.
+- **`packages/adapters/llm/package.json`** — adds
+  `@brandfactory/shared: workspace:*` to deps. No cycle (shared
+  has no adapter deps).
+- **`packages/server/src/env.ts`** — imports `LLM_PROVIDER_IDS`
+  directly from shared. The local tuple + `satisfies` block goes
+  away; the `superRefine` `default: never` exhaustiveness guard
+  stays.
+- **`packages/server/src/settings.ts`** — `env.LLM_PROVIDER` is now
+  natively typed `LLMProviderId`, so the `as LLMProviderId` cast in
+  `resolveLLMSettings` is removed along with the "kept aligned by
+  hand" comment.
+
+After this pass there is exactly one place to widen the provider
+list; every consumer fails compile or boot if anyone tries to
+drift.
+
+### `workspace_settings` — trust-boundary validation, not a CHECK
+
+The column is intentionally `text` (not `pgEnum`) so widening the
+provider list doesn't need a migration — but that meant any
+caller using an `as`-cast or hand-rolled SQL could write garbage
+that bypassed the route's zod gate. Adding a CHECK constraint
+would have undone the widen-without-migration design.
+
+- **`packages/db/src/queries/workspace-settings.ts`** —
+  `rowToWorkspaceSettings` (read path) and
+  `upsertWorkspaceSettings` (write path) both run the value
+  through `LLMProviderIdSchema.parse`. The helper is now the
+  trust boundary: nothing past it sees a provider id outside
+  `LLM_PROVIDER_IDS`. If the shipped enum widens in shared but
+  production hasn't deployed the new server yet, a row written by
+  the new code surfaces loudly in the old code instead of
+  corrupting downstream typing.
+- **`packages/db/src/schema/workspace_settings.ts`** — comment
+  updated to call out the helper as the trust boundary, with a
+  pointer to the `LLMProviderIdSchema` parse.
+- Migration intentionally not regenerated; column type is
+  unchanged.
+
+### Realtime — discriminated-union return from `buildAdapters`
+
+`main.ts` previously did `adapters.realtime as
+NativeWsRealtimeBus` to reach `bindToNodeWebSocketServer`. The
+cast defeated the type system — adding a future redis or supabase
+realtime impl would have failed at runtime, not compile time.
+
+- **`packages/server/src/adapters.ts`** — new `RealtimeAdapter =
+  { provider: 'native-ws'; bus: NativeWsRealtimeBus }`
+  discriminated union. `Adapters.realtime: RealtimeAdapter`.
+  `buildAdapters` returns `{ provider: 'native-ws', bus:
+  createNativeWsRealtimeBus() }`.
+- **`packages/server/src/main.ts`** — cast removed. The Hono app
+  receives `adapters.realtime.bus` directly (it only needs the
+  `RealtimeBus` pub/sub surface). The WS upgrade is mounted via a
+  `switch` on `adapters.realtime.provider` with a `const
+  _exhaustive: never = adapters.realtime.provider` default branch
+  — adding a second variant fails compile at the `default:` case.
+- **`packages/server/src/adapters.test.ts`** — assertion updated
+  to check `realtime.provider === 'native-ws'` and that
+  `realtime.bus` carries the expected functions.
+- `AppDeps.realtime` keeps its `RealtimeBus` type (the app
+  doesn't need the binder), so route modules and `createTestApp`
+  are unchanged.
+
+### Blobs — `instanceof BlobNotFoundError`
+
+- **`packages/server/src/routes/blobs.ts`** — imports
+  `BlobNotFoundError` from `@brandfactory/adapter-storage`; uses
+  `err instanceof BlobNotFoundError` instead of the previous
+  `(err as Error).name === 'BlobNotFoundError'` sniff. The class
+  is already on the storage port, so the sniff bought nothing
+  and was brittle if the impl ever renamed it.
+- **`packages/server/src/routes/blobs.test.ts`** — fake store
+  throws `new BlobNotFoundError(key)` instead of constructing a
+  generic `Error` with a hand-set `name`.
+
+### Brand guidelines — atomic upsert + reorder
+
+Phase 4's `PATCH /brands/:id/guidelines` looped `upsertSection`
+(one statement per item, no shared tx) then called
+`reorderSections` (which is itself in a tx). A failure mid-loop
+left the brand half-updated.
+
+- **`packages/db/src/queries/brands.ts`** — new
+  `updateBrandGuidelines(brandId, sections):
+  Promise<BrandGuidelineSection[]>`. Single `db.transaction`:
+  each input either updates an existing row by id+brand or
+  inserts a new one; the final select returns the sorted list,
+  same shape as `listSectionsByBrand`. `upsertSection` and
+  `reorderSections` are kept on the package surface — the smoke
+  script still uses `upsertSection`.
+- **`packages/server/src/db.ts`** — `Db` facade exposes
+  `updateBrandGuidelines` instead of `upsertSection` +
+  `reorderSections`. The route was the only server consumer.
+- **`packages/server/src/routes/brands.ts`** — PATCH calls
+  `updateBrandGuidelines` with a flat map; the previous "collect
+  ids, then reorder" two-step is gone.
+- **`packages/server/src/test-helpers.ts`** — fake
+  `updateBrandGuidelines` mirrors the real helper's "update by
+  id, else insert" branch and returns the sorted section list.
+
+### Items deliberately deferred
+
+Same review surfaced these; each has a natural home in a later
+phase, none block Phase 5:
+
+- WS `?token=` query fallback exposure to upstream proxy logs —
+  Phase 7 CORS / cookie-based ticket flow.
+- Logger redaction for tokens/secrets — Phase 8 swap to pino.
+- Blobs PUT content-type / max-body validation — Phase 8 polish
+  (content-type persistence is already on that list).
+- Live WS upgrade end-to-end test — needs the live boot smoke
+  (Postgres + ws server); captured under Phase 4 follow-ups.
+- 404 vs 403 ordering on `GET /brands/:id` and friends —
+  consistent across routes, matches the WS `authorizeChannel`
+  walk; product call to revisit.
+
+### Verification
+
+All green:
+
+```
+pnpm install       ✔
+pnpm typecheck     ✔  9/9 workspaces pass
+pnpm lint          ✔  0 problems
+pnpm format:check  ✔  all files clean
+pnpm test          ✔  19 files, 83 tests pass
+```
+
+Phase 4 wrap was already at 83; this pass kept the count steady
+because every changed code path had route-level coverage.
+
+### Post-Phase-4 cleanup record — `docs/completions/phase4-cleanup.md`
+
+Per-issue writeup of all six fixes, files changed, the
+deliberately-deferred items, and the rationale for choosing
+helper-boundary validation over a `CHECK` constraint on
+`workspace_settings.llm_provider_id`.
+
+---
+
+## 0.5.0 — 2026-04-19
+
+The first bootable backend in the repo. `@brandfactory/server`
+ships a Hono-on-`@hono/node-server` HTTP surface with a `/rt`
+WebSocket upgrade, wired to the Phase 3 adapter bundle and the
+Phase 2 query helpers. Running `pnpm --filter @brandfactory/server
+dev` boots the server end-to-end: `loadEnv()` → `buildAdapters` →
+`buildDbDeps` → `createApp` → `serve` → `mountRealtime` →
+SIGTERM/SIGINT-driven ordered shutdown (WS → HTTP → `pool.end()`).
+Test count grew from 34 to 83 (49 new server tests across 11 new
+files); typecheck, lint, format clean across 9 workspaces.
+
+### Phase 4 execution plan — `docs/executing/phase-4-server.md`
+
+Expanded Phase 4 of the scaffolding plan into a file-by-file task
+list and locked sixteen design decisions: Hono on
+`@hono/node-server`, the `main.ts` (deploy entry) /
+`app.ts` (factory) / `index.ts` (barrel) split, end-to-end types
+via Hono's chained `.get/.post` builders so Phase 7 can infer
+through `hono/client`, zod at every boundary via
+`@hono/zod-validator`, bearer-only auth with `c.var.userId` as the
+contract, single-owner authorization via `requireXAccess` walks,
+~40-line inline JSON logger, minimal error boundary with a wire
+shape Phase 9 will keep stable, env-only API keys with a
+`workspace_settings` row for provider/model overrides,
+`PATCH /brands/:id/guidelines` as an upsert-and-reorder over the
+full section list (deletion out of scope), `/blobs` mounted only
+when `STORAGE_PROVIDER === 'local-disk'`, `/rt` upgrade via
+`ws.Server({ noServer: true })` with token via `Authorization` or
+`?token=`, channel naming `project:` / `brand:` / `workspace:`
+with an `authorizeChannel` walk, `dev` script as `tsx watch
+src/main.ts` (build deferred to Phase 8), and vitest coverage of
+every middleware + route happy path + at least one error path.
+
+### Shared additions — client-importable DTOs
+
+Phase 4 introduced four new HTTP boundaries; their input/output
+schemas live in shared so `web` can validate the same wire types.
+
+- `workspace/settings.ts` — `WorkspaceSettingsSchema`,
+  `UpdateWorkspaceSettingsInputSchema`,
+  `ResolvedWorkspaceSettingsSchema` (`{ workspaceId,
+  llmProviderId, llmModel, source: 'workspace' | 'env' }`). Plus a
+  client-importable `LLMProviderIdSchema` (re-aligned to a single
+  source of truth in 0.5.1).
+- `workspace/create.ts` — `CreateWorkspaceInputSchema` (`{ name }`
+  only; `ownerUserId` is injected by the route from the authed
+  user).
+- `brand/create.ts` — `CreateBrandInputSchema` (`{ name,
+  description? }`).
+- `brand/update-guidelines.ts` —
+  `UpdateBrandGuidelinesInputSchema` (`{ sections: Array<{ id?,
+  label, body, priority }> }`). `id` present → upsert existing,
+  absent → insert new. Section deletion is out of scope for
+  Phase 4.
+- `project/create.ts` — `CreateProjectInputSchema` discriminated
+  on `kind ∈ {freeform, standardized}`.
+- `src/index.ts` — barrel updated.
+
+### DB additions — `workspace_settings` table
+
+- `src/schema/workspace_settings.ts` — singleton-per-workspace
+  row: `workspace_id uuid pk fk→workspaces(id) on delete
+  cascade`, `llm_provider_id text`, `llm_model text`,
+  `updated_at timestamptz`. Provider id is stored as `text`, not
+  a `pgEnum`, so the shipped-provider list can widen without a
+  migration; the server validates `LLMProviderIdSchema` at the
+  edge.
+- `src/queries/workspace-settings.ts` —
+  `getWorkspaceSettings`, `upsertWorkspaceSettings`
+  (`INSERT ... ON CONFLICT (workspace_id) DO UPDATE`).
+- `drizzle/0001_shocking_the_watchers.sql` — generated via
+  `pnpm --filter @brandfactory/db db:generate`. Idempotent
+  (`IF NOT EXISTS` on the table, `DO $$ BEGIN ... EXCEPTION
+  WHEN duplicate_object` on the FK).
+- `scripts/smoke.ts` extended: asserts `getWorkspaceSettings`
+  returns `null` pre-write, then upsert-with-provider-a →
+  upsert-with-provider-b exercises the `ON CONFLICT` branch.
+
+### Server implementation — `packages/server`
+
+The bulk of the phase. Twenty-plus source files, eleven new
+test files.
+
+- **`package.json`** — added `hono`, `@hono/node-server`,
+  `@hono/zod-validator` (bumped to `^0.7.6` for zod-4 support),
+  `ws`, `@brandfactory/db` runtime deps; `@types/ws` dev dep;
+  `dev` / `start` scripts (`tsx watch src/main.ts` /
+  `tsx src/main.ts`).
+- **`src/env.ts`** — appended `PORT` (coerced number, default
+  `3001`), `HOST` (default `'0.0.0.0'`), `LOG_LEVEL` (enum,
+  default `'info'`). No `superRefine` changes needed.
+- **`src/logger.ts`** — ~55-line inline JSON logger with level
+  filtering and a `child(fields)` builder. Injectable `write`
+  and `now` for tests; the default writes
+  `JSON.stringify({ ts, level, msg, ... })` to stdout.
+- **`src/errors.ts`** — `HttpError` plus `UnauthorizedError`,
+  `ForbiddenError`, `NotFoundError`, `ValidationError`
+  subclasses. Wire shape `{ code, message, details? }` matches
+  what Phase 9 will keep stable.
+- **`src/context.ts`** — `AppEnv` bindings type; `ServerHono`
+  alias so every route module shares the same `c.var` types.
+- **`src/middleware/request-id.ts`** — reads `x-request-id`,
+  falls back to `randomUUID()`, echoes the header on the
+  response.
+- **`src/middleware/logger.ts`** — attaches a child logger (with
+  `requestId`) to `c.var.log`; logs `{ method, path, status,
+  durationMs, userId }` after each request.
+- **`src/middleware/auth.ts`** — `createAuthMiddleware(auth)`
+  extracts `Bearer <token>`, calls `auth.verifyToken`, writes
+  `c.var.userId` or throws `UnauthorizedError`.
+  `createOptionalAuthMiddleware(auth)` attaches `userId` when a
+  valid token is present but never throws — used on `/health`.
+- **`src/middleware/error.ts`** — `onError` maps `HttpError` →
+  status+code, `ZodError` → 400 with `details`, unknown → 500
+  and logs the stack.
+- **`src/authz.ts`** — `requireWorkspaceAccess`,
+  `requireBrandAccess`, `requireProjectAccess`. The `AuthzDeps`
+  interface lists only the `getXById` helpers each walk uses, so
+  tests drop in fakes without touching the singleton.
+- **`src/db.ts`** — `Db` interface + `buildDbDeps()` facade over
+  `@brandfactory/db`'s module exports. Each field is typed as
+  `typeof db.helperName`, so renaming or changing a helper's
+  signature in Phase 2's package surfaces here as a type error.
+- **`src/settings.ts`** — `resolveLLMSettings(workspaceId, env,
+  deps)`. Returns the stored row with `source: 'workspace'` or
+  falls back to env with `source: 'env'`. Phase 6 consumes it
+  from the agent endpoint.
+- **`src/routes/health.ts`** — `GET /health` → `{ status: 'ok',
+  version }`. No auth required.
+- **`src/routes/me.ts`** — `GET /me`; calls
+  `auth.getUserById(userId)`, 404s `USER_NOT_FOUND` on miss.
+- **`src/routes/workspaces.ts`** — `GET /`, `POST /`, `GET /:id`
+  (with `requireWorkspaceAccess` on the single-resource route).
+- **`src/routes/brands.ts`** — two router factories
+  (`createWorkspaceBrandsRouter` for `GET /:workspaceId/brands`
+  and `POST /:workspaceId/brands`; `createBrandsRouter` for
+  `GET /:id` and `PATCH /:id/guidelines`) mounted separately at
+  `/workspaces` and `/brands` in `app.ts`. `GET /:id` hydrates
+  sections into `BrandWithSections`. `PATCH /:id/guidelines`
+  loops `upsertSection` then calls `reorderSections` with the
+  full priority list (refactored to a single-tx
+  `updateBrandGuidelines` helper in 0.5.1).
+- **`src/routes/projects.ts`** — `createBrandProjectsRouter`
+  (list + create under `/brands/:brandId/projects`) and
+  `createProjectsRouter` (`GET /projects/:id`). Creation
+  implicitly creates the 1:1 canvas row (refactored to a single
+  `createProjectWithCanvas` tx helper in 0.5.1).
+- **`src/routes/settings.ts`** — `GET` + `PATCH` on
+  `/workspaces/:id/settings`.
+- **`src/routes/blobs.ts`** — `GET /:key{.+}` + `PUT /:key{.+}`
+  (wildcard segment matches nested keys). Both verify
+  `?exp=&sig=` via `verifySignature` and surface `ForbiddenError`
+  on mismatch. `GET` returns a `Response(bytes)` with
+  `content-type: application/octet-stream` (content-type
+  persistence is a Phase 8 polish). `PUT` reads the request body
+  via `c.req.arrayBuffer()` and calls `storage.put(key, bytes,
+  { contentType })`.
+- **`src/app.ts`** — `createApp(deps)` composes middleware +
+  routes and returns the typed Hono instance. Mounts `/health`
+  first, then path-scoped auth middleware on `/me/*`,
+  `/workspaces/*`, `/brands/*`, `/projects/*`, then the route
+  modules, then `/blobs` if `STORAGE_PROVIDER === 'local-disk'`.
+  Exports `type AppType = ReturnType<typeof createApp>` so
+  Phase 7's `hono/client` can infer end-to-end types.
+- **`src/ws.ts`** — `mountRealtime({ httpServer, realtime,
+  auth, db, log })`. Creates `ws.Server({ noServer: true })`,
+  intercepts `httpServer`'s `upgrade` only on pathname `/rt`,
+  and binds the realtime bus with a token-based `authenticate`
+  and an `authorizeChannel`-based `authorize`. Token extraction
+  accepts both `Authorization: Bearer` and `?token=` (browsers
+  can't set custom headers on `new WebSocket`). Returns a
+  `close()` handle for graceful shutdown.
+- **`src/main.ts`** — the deployable entry: `dotenv/config` →
+  `loadEnv` → `createLogger` → `buildAdapters` → `buildDbDeps`
+  → `createApp` → `serve` → `mountRealtime`. `SIGTERM`/`SIGINT`
+  trigger an ordered shutdown (WS → HTTP → `pool.end()`).
+- **`src/index.ts`** — barrel extended with `createApp`,
+  `AppType`, `buildDbDeps`, `Db`, `createLogger`, `Logger`,
+  `LogLevel`, the error classes, and `mountRealtime`.
+- **`src/test-helpers.ts`** — `silentLogger`, `createFakeDb`
+  (in-memory implementation of the full `Db` surface),
+  `createFakeAuth`, `createFakeAdapters`, `testEnv`,
+  `createTestApp`. Every fake matches the real signature so
+  drift in the underlying package shows up as a type error.
+
+### Tests — 11 new files, 49 new tests
+
+Totals: 13 server files / 58 server tests, 19 repo files / 83
+repo tests.
+
+- `src/middleware/auth.test.ts` — valid bearer, missing header,
+  invalid token, optionalAuth no-header, optionalAuth with valid
+  token (5).
+- `src/middleware/error.test.ts` — `HttpError`, `HttpError` with
+  details, `ZodError` → 400, unknown → 500 with `log.error`
+  called (4).
+- `src/authz.test.ts` — owner passes / non-owner 403 / missing
+  404 per helper (9).
+- `src/routes/health.test.ts` — smoke (1).
+- `src/routes/me.test.ts` — happy path, 404 when the auth
+  provider has no matching user, 401 without a bearer (3).
+- `src/routes/workspaces.test.ts` — create-mine, list-mine-only,
+  forbidden-on-others, 400 on empty name (4).
+- `src/routes/brands.test.ts` — create in owned workspace,
+  forbidden on non-owned workspace, `GET /brands/:id` hydrates
+  sections, `PATCH` upsert + reorder (label edit + priority
+  swap) (4).
+- `src/routes/projects.test.ts` — freeform create (asserts the
+  canvas was implicitly created), standardized create with
+  `templateId`, `GET /projects/:id` returns `canvas` nested (3).
+- `src/routes/settings.test.ts` — env fallback, PATCH then GET
+  reflects `source: 'workspace'`, bogus provider → 400 (3).
+- `src/routes/blobs.test.ts` — signed PUT, signed GET
+  (round-trip), expired → 403, tampered → 403, missing sig
+  params → 400, not-mounted under `STORAGE_PROVIDER=supabase` →
+  404 (6).
+- `src/ws.test.ts` — `authorizeChannel` for workspace / brand /
+  project happy paths, wrong user denied, missing aggregate
+  denied, unknown prefix denied, malformed channel denied (7).
+
+### `.env.example` — extended
+
+Appended `PORT`, `HOST`, `LOG_LEVEL` with a comment explaining
+that `/blobs` is only mounted when
+`STORAGE_PROVIDER=local-disk`. Updated `BLOB_PUBLIC_BASE_URL`
+default to `:3001/blobs` to match `PORT=3001`.
+
+### API notes worth remembering
+
+- **Hono sub-app middleware bleeds across `app.route('/',
+  child)`.** The first attempt defined an "auth-required"
+  sub-app (`api.use('*', authRequired)`) and mounted it at `/`.
+  That made the auth middleware fire for `/blobs/*` too —
+  breaking the blob tests with 401s. Fix: drop the sub-app and
+  scope `authRequired` per prefix on the root app
+  (`app.use('/me/*', authRequired)` etc.). Route modules
+  themselves stayed unchanged.
+- **`zod-validator` peer range.** `@hono/zod-validator@0.4.x`
+  peers `zod@^3.19.1`, which breaks with zod 4. `0.7.6` peers
+  `zod ^3.25 || ^4.0`. Bumped on install.
+- **`@hono/node-server`'s `serve()` return type.** The callback
+  receives a partial `{ port }` info object; the function
+  returns Node's `http.Server` but the type assertion has to be
+  `as unknown as HttpServer` because the exported type uses a
+  narrower interface. Isolated to `main.ts`.
+- **Hono param wildcards.** `/:key{.+}` matches keys with `/`
+  segments (needed for nested blob paths). Documented in Hono
+  but non-obvious; `/:key` alone would reject
+  `nested/path/hello.txt`.
+- **`BlobNotFoundError` detection.** Phase 4 sniffed `err.name
+  === 'BlobNotFoundError'` to keep `routes/blobs.ts` decoupled
+  from the storage impl package; 0.5.1 swapped this for
+  `instanceof BlobNotFoundError` against the exported class.
+
+### Phase 4 completion record — `docs/completions/phase4.md`
+
+Phase-level wrap with per-file detail (mirrors the Phase 3
+writeup shape rather than splitting per-task). Captures the
+sixteen locked decisions delivered as specified, the ws-mount
+override surprise, the conditional `/blobs` mount, and the
+follow-ups (live boot smoke against Postgres / live WS upgrade
+/ logger swap to pino in Phase 8).
+
+### Verification
+
+All green:
+
+```
+pnpm install       ✔
+pnpm typecheck     ✔  9/9 workspaces pass
+pnpm lint          ✔  0 problems
+pnpm format:check  ✔  all files clean
+pnpm test          ✔  19 files, 83 tests pass (was 13 files / 34 tests)
+```
+
+Zero new peer-dep warnings beyond the pre-existing
+`ai-sdk`/`zod@3` set documented in 0.4.0. The live HTTP/WS boot
+smoke (`curl localhost:3001/health` etc.) needs a running
+Postgres; Docker wasn't available in the session so that
+transcript wasn't captured — `createApp` runs end-to-end against
+every route in unit tests, including the blob upload/download
+round-trip, the auth gate, the error boundary, and the
+conditional `/blobs` mount.
 
 ---
 

@@ -8,7 +8,7 @@ import {
   createLocalDiskBlobStore,
   createSupabaseBlobStore,
 } from '@brandfactory/adapter-storage'
-import { type RealtimeBus, createNativeWsRealtimeBus } from '@brandfactory/adapter-realtime'
+import { type NativeWsRealtimeBus, createNativeWsRealtimeBus } from '@brandfactory/adapter-realtime'
 import {
   type LLMProvider,
   type LLMProviderConfig,
@@ -16,10 +16,17 @@ import {
 } from '@brandfactory/adapter-llm'
 import type { Env } from './env'
 
+// Realtime is a discriminated union so consumers that need provider-specific
+// capabilities (e.g. `main.ts` calls `bindToNodeWebSocketServer` on the
+// native-ws bus) can narrow without an `as` cast. When a second impl lands,
+// add another branch here and let TS surface the missing case at every wire-up
+// site.
+export type RealtimeAdapter = { provider: 'native-ws'; bus: NativeWsRealtimeBus }
+
 export interface Adapters {
   auth: AuthProvider
   storage: BlobStore
-  realtime: RealtimeBus
+  realtime: RealtimeAdapter
   llm: LLMProvider
 }
 
@@ -46,8 +53,9 @@ export function buildAdapters(env: Env): Adapters {
           bucket: env.SUPABASE_STORAGE_BUCKET!,
         })
 
-  // Only one realtime impl ships in Phase 3; widen as more land (decision 15).
-  const realtime: RealtimeBus = createNativeWsRealtimeBus()
+  // Only one realtime impl ships in Phase 3; widen the discriminated union
+  // and the `RealtimeAdapter` type together as more land (decision 15).
+  const realtime: RealtimeAdapter = { provider: 'native-ws', bus: createNativeWsRealtimeBus() }
 
   const llmConfig: LLMProviderConfig = {}
   if (env.ANTHROPIC_API_KEY) {

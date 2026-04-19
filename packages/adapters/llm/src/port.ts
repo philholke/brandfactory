@@ -1,6 +1,10 @@
 import type { LanguageModel } from 'ai'
+import type { LLMProviderId } from '@brandfactory/shared'
 
-export type LLMProviderId = 'openrouter' | 'anthropic' | 'openai' | 'ollama'
+// Re-export so existing `import { LLMProviderId } from '@brandfactory/adapter-llm'`
+// call sites keep working. Source of truth lives in `@brandfactory/shared` so
+// shared, adapter-llm, and the server's env loader can't drift.
+export type { LLMProviderId }
 
 export interface LLMProviderSettings {
   providerId: LLMProviderId

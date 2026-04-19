@@ -1,19 +1,16 @@
 import { z } from 'zod'
-import type { LLMProviderId } from '@brandfactory/adapter-llm'
+import { LLM_PROVIDER_IDS } from '@brandfactory/shared'
 
 // Single env schema for the server. Per locked decision 13, every adapter
 // gets discrete env vars (not a JSON blob); per locked decision 15, the
 // `*_PROVIDER` enums only list shipped impls — adding a future provider
 // widens the enum *and* the buildAdapters switch in lockstep.
+//
+// `LLM_PROVIDER_IDS` lives in `@brandfactory/shared` (single source of truth);
+// `@brandfactory/adapter-llm` re-exports the type from there too. Widening the
+// list anywhere fails compile in every consumer.
 
 const NonEmpty = z.string().min(1)
-
-const LLM_PROVIDER_IDS = [
-  'openrouter',
-  'anthropic',
-  'openai',
-  'ollama',
-] as const satisfies readonly LLMProviderId[]
 
 export const EnvSchema = z
   .object({
@@ -55,6 +52,11 @@ export const EnvSchema = z
     OPENROUTER_API_KEY: NonEmpty.optional(),
     OPENROUTER_BASE_URL: NonEmpty.optional(),
     OLLAMA_BASE_URL: NonEmpty.optional(),
+
+    // HTTP server (Phase 4).
+    PORT: z.coerce.number().int().min(1).max(65535).default(3001),
+    HOST: NonEmpty.default('0.0.0.0'),
+    LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   })
   .superRefine((env, ctx) => {
     function require_(field: keyof typeof env, when: string) {

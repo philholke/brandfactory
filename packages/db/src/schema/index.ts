@@ -1,5 +1,6 @@
 export * from './users'
 export * from './workspaces'
+export * from './workspace_settings'
 export * from './brands'
 export * from './guideline_sections'
 export * from './projects'
