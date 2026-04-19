@@ -9,6 +9,15 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@brandfactory/db": "workspace:*",
+    "@brandfactory/shared": "workspace:*",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
   }
 }

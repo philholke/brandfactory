@@ -5,9 +5,318 @@ below, with full detail further down.
 
 ## Index
 
+- **0.4.0** — 2026-04-19 — Phase 3: four `@brandfactory/adapter-*` packages land with ports + default impls, `@brandfactory/server` gains `loadEnv()` + `buildAdapters()`, vitest stands up across the repo with 31 unit tests green.
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.4.0 — 2026-04-19
+
+First swappable port-and-adapter layer in the repo. Four
+`@brandfactory/adapter-*` packages each export a port type plus the
+default impls that satisfy it. `@brandfactory/server` reads a single
+zod-validated env at boot and assembles the four adapters into a typed
+bundle — no vendor name leaks past the adapter boundary. Realtime,
+storage, and auth all surface dependency-injection seams so Phase 3 ships
+the first real unit-test layer alongside the code (vitest, projects
+mode, 31 tests across 8 files).
+
+### Phase 3 execution plan — `docs/executing/phase-3-adapters.md`
+
+- Expanded Phase 3 of the scaffolding plan into a file-by-file task
+  list across nine tasks (shared envelope prerequisite, four adapter
+  packages, server env loader + `buildAdapters`, root vitest setup,
+  `.env.example`, smoke check).
+- Locked fifteen design decisions up front: ports live in their adapter
+  package (no new `core` workspace), `buildAdapters(env)` lives in
+  `packages/server`, env validation lives in `packages/server/src/env.ts`
+  and adapters never read `process.env` themselves, the LLM port returns
+  an AI-SDK `LanguageModel` (no extra abstraction), the realtime port is
+  pub/sub only with HTTP/WS upgrade deferred to Phase 4, the storage port
+  surfaces signed URLs for both reads and writes (HMAC-SHA256 over
+  `(method, key, exp)` for `local-disk`), `AuthProvider` collapses to
+  `verifyToken` + `getUserById` only (`listUsers` dropped — DB territory,
+  not identity-provider territory), settings are env-only in Phase 3,
+  vitest is the project test runner, the WS framing schema lives in
+  `@brandfactory/shared` (so `web` can speak the same protocol),
+  per-provider config is discrete env vars validated with `superRefine`,
+  vitest runs in projects mode with one root config + per-package configs,
+  and deferred adapter impls are absent from code rather than throw-stubs
+  (the `*_PROVIDER` enum narrows to shipped impls so a misconfigured env
+  fails loudly at boot).
+- Archived to `docs/archive/phase-3-adapters.md` on completion.
+
+### Prerequisite shared addition — `packages/shared/src/realtime/envelope.ts`
+
+Per locked decision 12, the WS framing schema lives in shared so both
+`web` and `server` can validate the same protocol — adapter packages are
+server-only and `web` cannot import from them.
+
+- `RealtimeChannelSchema = z.string().min(1)` (intentionally loose for
+  Phase 3; tighter naming convention lands when the server picks one).
+- `RealtimeEventPayloadSchema = z.union([AgentEventSchema,
+  CanvasOpEventSchema, PinOpEventSchema])`.
+- `RealtimeClientMessageSchema` — browser → server: `subscribe |
+  unsubscribe`, discriminated on `type`.
+- `RealtimeServerMessageSchema` — server → browser: `event` (kept as a
+  single-branch discriminated union so adding `error`/`ack` later is
+  mechanical).
+- Inferred types exported alongside; barrel re-export in
+  `packages/shared/src/index.ts`.
+
+### Phase 3 implementation — four adapter packages
+
+Each adapter follows the same shape: `port.ts` declares the interface
+and any error classes, one file per impl exports a factory function
+(`createXxx(config, deps?)`) returning a plain object satisfying the
+port, `index.ts` is a barrel that opens with a header comment listing
+shipped *and* planned-but-not-yet-shipped impls so future intent
+survives without runtime stubs.
+
+- **`@brandfactory/adapter-auth`** —
+  - Port: `verifyToken(token) → { userId }` + `getUserById(id) → User
+    | null`. `User` is re-exported from `@brandfactory/db` so callers
+    get one canonical row type. `InvalidTokenError` for any rejection.
+  - `local`: dev-only, the bearer token IS the user id (uuid-validated
+    via regex, then looked up via `@brandfactory/db.getUserById`).
+    Token-as-id collapses crypto-free local dev into a single line of
+    setup; production callers wire a real provider instead.
+  - `supabase`: `jose.createRemoteJWKSet` + `jose.jwtVerify` against
+    the project JWKS. `audience` and `issuer` optional. The `sub`
+    claim becomes `userId`. A `jwks` test seam lets unit tests pass
+    an in-memory key set instead of fetching one. Phase 3 does not
+    sync Supabase Auth's `auth.users` back into our `users` table.
+
+- **`@brandfactory/adapter-storage`** —
+  - Port: `BlobStore` with `put | get | delete | getSignedReadUrl |
+    getSignedWriteUrl`. Bodies accepted as `Uint8Array` or Node
+    readable streams. `BlobNotFoundError` and `InvalidSignatureError`
+    exposed.
+  - `local-disk`: filesystem under `rootDir` with `mkdir -p` on each
+    `put`. Path-traversal defense via `path.resolve` + a startsWith
+    check against the resolved root (`../escape.bin` throws before any
+    I/O). Signed URLs are HMAC-SHA256 over `${method}\n${key}\n${exp}`,
+    hex-encoded, with a 15-minute default TTL. URL shape:
+    `${publicBaseUrl}/${encodeURI(key)}?exp=<unix>&sig=<hex>`. A
+    `verifySignature({ method, key, exp, sig, signingSecret, now? })`
+    helper is exported for the Phase 4 server route — does an expiry
+    check, recomputes the HMAC, and compares with
+    `crypto.timingSafeEqual`. Constant-time + length-checked.
+  - `supabase`: thin wrapper over `client.storage.from(bucket)`'s
+    `upload | download | remove | createSignedUrl |
+    createSignedUploadUrl`. A `client` dep injection seam keeps unit
+    tests off the real `@supabase/supabase-js` fetch path.
+
+- **`@brandfactory/adapter-realtime`** —
+  - Port: `RealtimeBus` with `publish(channel, event) → Promise<void>`
+    + `subscribe(channel, handler) → unsubscribe`. Event type imported
+    from `@brandfactory/shared` (`AgentEvent | CanvasOpEvent |
+    PinOpEvent`).
+  - `native-ws`: in-process `Map<channel, Set<handler>>`. Empty sets
+    are collected on unsubscribe. Handler exceptions are swallowed so
+    one bad subscriber can't break fan-out (will surface via a logger
+    in Phase 4).
+  - `bindToNodeWebSocketServer(wss, { authenticate, authorize? })`
+    wires a `ws.Server`'s `connection` event to per-client
+    subscribe/unsubscribe handling. Failed `authenticate` →
+    `socket.close(4401, 'unauthorized')`. Inbound frames are validated
+    against `RealtimeClientMessageSchema` from shared. Outbound frames
+    are typed as `RealtimeServerMessage`. Adapter does not own the
+    HTTP upgrade — that lives in `packages/server` (Phase 4).
+
+- **`@brandfactory/adapter-llm`** —
+  - Port: `LLMProvider.getModel({ providerId, modelId }) →
+    LanguageModel`, `LLMProviderId = 'openrouter' | 'anthropic' |
+    'openai' | 'ollama'`, `LLMProviderConfig` (per-provider config
+    blocks), `ProviderNotConfiguredError`. `LanguageModel` is `import
+    type` from `ai` — no intermediate abstraction since Phase 5's
+    `agent` package will consume AI-SDK directly.
+  - `createLLMProvider(config, deps?)`: per-provider AI-SDK clients
+    are constructed eagerly via `createAnthropic` / `createOpenAI` /
+    `createOpenRouter` / `createOllama` and cached in a
+    `Map<LLMProviderId, ProviderFactory>` so a long-running server
+    doesn't rebuild on every `getModel` call. Exhaustiveness on
+    `providerId` enforced by a `_exhaustive: never` default branch.
+    API-key providers throw `ProviderNotConfiguredError` if the
+    matching config block is missing; `ollama` is always callable
+    (defaults to a local daemon, no key needed). Each `buildXxx` is a
+    test seam — unit tests pass `vi.fn()` factories and never load
+    the real SDK paths.
+
+### Server env loader + `buildAdapters` — `packages/server`
+
+- **`src/env.ts`** — one `EnvSchema = z.object({…}).superRefine(…)`.
+  Required base fields: `DATABASE_URL`, the four `*_PROVIDER`
+  selectors, `LLM_MODEL`. Optional per-provider fields are
+  `.optional()` and promoted to required by `superRefine` based on
+  which providers are active:
+  - `AUTH_PROVIDER='supabase'` → `SUPABASE_JWKS_URL` required.
+  - `STORAGE_PROVIDER='local-disk'` → `BLOB_LOCAL_DISK_ROOT` +
+    `BLOB_SIGNING_SECRET` + `BLOB_PUBLIC_BASE_URL` required.
+  - `STORAGE_PROVIDER='supabase'` → `SUPABASE_URL` +
+    `SUPABASE_SERVICE_KEY` + `SUPABASE_STORAGE_BUCKET` required.
+  - `LLM_PROVIDER='anthropic'|'openai'|'openrouter'` → matching
+    `*_API_KEY` required. `LLM_PROVIDER='ollama'` requires nothing.
+  - `LLM_PROVIDER_IDS` declared `as const satisfies readonly
+    LLMProviderId[]` so a future enum widening in `adapter-llm` won't
+    silently drift from this schema — TS fails the satisfies check.
+  - `loadEnv(source = process.env)` returns the parsed `Env` or throws
+    with a multi-line `path: message` summary of every issue.
+- **`src/adapters.ts`** — `buildAdapters(env): { auth, storage,
+  realtime, llm }` switches on each `*_PROVIDER` and calls the
+  matching factory with the right env slice. Realtime is currently
+  unconditional (only `native-ws` ships in Phase 3); adding a second
+  impl widens the enum *and* the switch in lockstep, with the
+  compiler enforcing exhaustiveness.
+
+### Vitest setup — root + per-package projects mode
+
+- Root `vitest.config.ts` declares `test.projects` pointing at the
+  five tested workspaces (`adapters/{auth,storage,realtime,llm}` +
+  `server`).
+- Each project ships its own `vitest.config.ts` using `defineProject`
+  with a `name` (so the runner labels output per package),
+  `include: src/**/*.test.ts`, `environment: 'node'`. Per-package
+  `pnpm --filter <pkg> test` continues to work, and so does the root
+  `pnpm test`.
+- `vitest@^2.1.8` added as a root devDep; root `test` script is now
+  `vitest run` instead of the old `pnpm -r --parallel test`.
+
+### `.env.example` — extended
+
+Adapter selection (`AUTH_PROVIDER`, `STORAGE_PROVIDER`,
+`REALTIME_PROVIDER`, `LLM_PROVIDER`, `LLM_MODEL`), the local-disk
+trio (`BLOB_LOCAL_DISK_ROOT`, `BLOB_SIGNING_SECRET`,
+`BLOB_PUBLIC_BASE_URL`), the Supabase set (`SUPABASE_URL`,
+`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`, `SUPABASE_JWKS_URL`,
+`SUPABASE_JWT_AUDIENCE`, `SUPABASE_JWT_ISSUER`,
+`SUPABASE_STORAGE_BUCKET`), and the LLM keys (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`,
+`OLLAMA_BASE_URL`). Header comment explains that `*_PROVIDER` picks
+which adapter the server wires up at boot.
+
+### Smoke check — unit tests across the adapter layer
+
+Per the scaffolding plan, Phase 3's smoke is **unit tests per
+adapter**, not an end-to-end. Test counts (all green):
+
+- `adapter-auth/local.test.ts` — 4 tests: uuid happy path, non-uuid
+  rejection, missing-user rejection, getUserById delegation. Uses an
+  injected `getUserById` so no DB is touched.
+- `adapter-auth/supabase.test.ts` — 3 tests: mints RS256 keys via
+  `jose.generateKeyPair`, verifies a valid token decodes to the right
+  `sub`, expired tokens reject, no-`sub` tokens reject. JWKS provided
+  via the test seam — no real Supabase or network.
+- `adapter-storage/local-disk.test.ts` — 6 tests: round-trips
+  put/get/delete in a `mkdtemp` root, asserts traversal rejection,
+  signs/verifies a read URL, rejects expired and tampered sigs,
+  asserts a PUT-signed URL doesn't verify as GET.
+- `adapter-storage/supabase.test.ts` — 2 tests: hand-rolled fake
+  client verifies the adapter calls the right SDK methods with the
+  right args, including content-type passing on writes.
+- `adapter-realtime/native-ws.test.ts` — 4 tests: spins up a real
+  `http.Server` + `ws.Server` on an ephemeral port and verifies
+  in-process publish/subscribe + idempotent unsubscribe, fan-out to
+  two real WS clients on the same channel, over-the-wire unsubscribe
+  stops further delivery, and `authenticate() → null` closes the
+  socket with code `4401`.
+- `adapter-llm/factory.test.ts` — 5 tests: caching (one
+  `buildAnthropic` call across two `getModel` calls), modelId
+  passing, openrouter `baseURL` plumbing, ollama-with-no-config, and
+  the `ProviderNotConfiguredError` path.
+- `server/env.test.ts` — 6 tests: local happy path, supabase happy
+  path, and four conditional-required failure paths
+  (`SUPABASE_JWKS_URL`, `BLOB_SIGNING_SECRET`, `ANTHROPIC_API_KEY`,
+  ollama-with-no-key).
+- `server/adapters.test.ts` — 1 test: `loadEnv` + `buildAdapters` for
+  the local + native-ws + openrouter combo, asserts the returned
+  bundle has the four expected method shapes.
+
+### Cross-cutting changes outside the adapter packages
+
+- **`packages/shared`** — new `src/realtime/envelope.ts` + barrel
+  re-export. No other shared changes.
+- **`packages/db/src/client.ts`** — `pool` and `db` are now lazy
+  `Proxy`-wrapped singletons. The `DATABASE_URL` check moved from
+  module-import time to first-access time. Required because vitest
+  setup files run *after* module evaluation, so import-time `throw`s
+  cannot be neutralized by a sentinel value. Real callers see
+  identical behavior (still throws on first query if env isn't set);
+  test-time imports for type-only consumers no longer fail.
+- **Root `package.json`** — `vitest@^2.1.8` added to devDeps; root
+  `test` script now runs `vitest run` instead of the old
+  `pnpm -r --parallel test` recursion.
+- **Root `vitest.config.ts`** — new file, declares projects mode.
+
+### Architecture doc updates owed
+
+Per locked decision 10, `docs/architecture.md` originally sketched
+`AuthProvider` with `listUsers`. The Phase 3 port drops that method —
+listing users is `@brandfactory/db` territory, not an identity
+concern. Update needed: amend the AuthProvider port sketch in
+`docs/architecture.md` and link to the Phase 3 completion record.
+
+### API notes worth remembering
+
+- **Zod 4 vs AI-SDK peer:** the AI-SDK provider modules declare a
+  peer dependency on `zod@^3.x`; this repo runs `zod@^4.3`. pnpm
+  warns; the `LanguageModel` type we re-export is a plain TS
+  interface and isn't zod-derived, so the version skew is harmless
+  in our usage. If we ever consume a zod schema *exported* by an
+  AI-SDK module, revisit.
+- **`ws@8` `connection` handler:** delivers `(socket, req:
+  IncomingMessage)`; we read the request from the second arg for
+  `authenticate`. Header-based auth (e.g.
+  `Sec-WebSocket-Protocol: bearer.<token>`) belongs in the
+  user-supplied `authenticate` callback, not in the bus.
+- **HMAC URL format choice:** `${method}\n${key}\n${exp}` was picked
+  because newlines aren't valid in any of the inputs and the format
+  is trivially debuggable (`echo -ne "GET\nfoo\n123" | openssl dgst
+  -sha256 -hmac secret`). Verifier and signer share a single
+  source-of-truth function.
+- **`jose.generateKeyPair('RS256')`** returns `KeyLike`
+  (`CryptoKey | KeyObject`); the supabase auth test signs with
+  `KeyLike` rather than `CryptoKey` to avoid pulling the DOM lib
+  into our node-only tsconfig.
+- **Vitest projects mode requires per-package configs.** Vitest 2
+  needs a `vitest.config.ts` at each project root (or an inline
+  config). Per-package configs also let `web` later pick
+  `environment: 'jsdom'` without polluting the rest.
+
+### Phase 3 completion record — `docs/completions/phase3.md`
+
+Phase-level wrap with per-task notes inline (Phase 3's surface area
+was tighter than Phase 2; one document is enough). Captures the
+fifteen locked design decisions delivered as specified, every
+adapter's port + impl + test detail, the cross-cutting changes
+outside the adapter packages (shared envelope, db client lazy
+singleton, root vitest config, root `package.json` test script), the
+architecture-doc TODO around `listUsers`, and the API quirks worth
+remembering. Also documents what Phase 3 explicitly did *not* include
+(HTTP server / routes / middleware / WS upgrade endpoint / blob HTTP
+routes / workspace-level LLM settings / agent prompt assembly /
+Supabase Auth ↔ users sync / API-key encryption at rest / e2e — all
+per the plan's exclusion list).
+
+### Verification
+
+All green on a fresh install:
+
+```
+pnpm install       ✔
+pnpm test          ✔  8 files, 31 tests pass
+pnpm typecheck     ✔  9/9 workspaces pass
+pnpm lint          ✔  0 problems
+pnpm format:check  ✔  all files clean
+```
+
+The Phase 2 `db smoke` script was not re-run in this session because
+Docker wasn't available locally. The `client.ts` lazy-singleton
+refactor preserves the runtime contract (still throws on first DB
+access if `DATABASE_URL` is unset); the Phase 3 unit tests exercise
+the import-without-DB paths that previously broke.
 
 ---
 

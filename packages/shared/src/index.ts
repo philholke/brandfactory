@@ -16,3 +16,6 @@ export * from './project/canvas'
 
 // Agent event stream
 export * from './agent/events'
+
+// Realtime wire envelope
+export * from './realtime/envelope'
