@@ -79,4 +79,48 @@ describe('loadEnv', () => {
     } as unknown as NodeJS.ProcessEnv)
     expect(env.LLM_PROVIDER).toBe('ollama')
   })
+
+  it('rejects supabase storage missing all three required fields', () => {
+    let err: Error | undefined
+    try {
+      loadEnv({
+        ...baseLocal,
+        STORAGE_PROVIDER: 'supabase',
+        BLOB_LOCAL_DISK_ROOT: undefined,
+        BLOB_SIGNING_SECRET: undefined,
+        BLOB_PUBLIC_BASE_URL: undefined,
+      } as unknown as NodeJS.ProcessEnv)
+    } catch (e) {
+      err = e as Error
+    }
+    expect(err).toBeInstanceOf(Error)
+    expect(err?.message).toMatch(/SUPABASE_URL/)
+    expect(err?.message).toMatch(/SUPABASE_SERVICE_KEY/)
+    expect(err?.message).toMatch(/SUPABASE_STORAGE_BUCKET/)
+  })
+
+  it('reports every failure in a single error when multiple conditions are violated', () => {
+    let err: Error | undefined
+    try {
+      loadEnv({
+        ...baseLocal,
+        AUTH_PROVIDER: 'supabase',
+        STORAGE_PROVIDER: 'supabase',
+        LLM_PROVIDER: 'anthropic',
+        BLOB_LOCAL_DISK_ROOT: undefined,
+        BLOB_SIGNING_SECRET: undefined,
+        BLOB_PUBLIC_BASE_URL: undefined,
+        OPENROUTER_API_KEY: undefined,
+      } as unknown as NodeJS.ProcessEnv)
+    } catch (e) {
+      err = e as Error
+    }
+    expect(err).toBeInstanceOf(Error)
+    // supabase auth + supabase storage + anthropic LLM all missing config:
+    expect(err?.message).toMatch(/SUPABASE_JWKS_URL/)
+    expect(err?.message).toMatch(/SUPABASE_URL/)
+    expect(err?.message).toMatch(/SUPABASE_SERVICE_KEY/)
+    expect(err?.message).toMatch(/SUPABASE_STORAGE_BUCKET/)
+    expect(err?.message).toMatch(/ANTHROPIC_API_KEY/)
+  })
 })

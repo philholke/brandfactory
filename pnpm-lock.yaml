@@ -51,6 +51,9 @@ importers:
         specifier: ^5.9.6
         version: 5.10.0
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)
@@ -73,6 +76,9 @@ importers:
         specifier: ^1.1.0
         version: 1.2.0(zod@4.3.6)
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)
@@ -86,6 +92,9 @@ importers:
         specifier: ^8.18.0
         version: 8.20.0
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
@@ -99,6 +108,9 @@ importers:
         specifier: ^2.45.4
         version: 2.103.3
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)
@@ -117,6 +129,9 @@ importers:
         specifier: ^8.13.1
         version: 8.20.0
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       '@types/pg':
         specifier: ^8.11.10
         version: 8.20.0
@@ -151,6 +166,9 @@ importers:
         specifier: ^4.3.6
         version: 4.3.6
     devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
       tsx:
         specifier: ^4.19.2
         version: 4.21.0

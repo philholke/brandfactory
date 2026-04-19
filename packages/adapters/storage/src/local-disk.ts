@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
-import { Readable } from 'node:stream'
+import { type Readable } from 'node:stream'
 import { type BlobBody, type BlobStore, BlobNotFoundError, InvalidSignatureError } from './port'
 
 export interface LocalDiskBlobStoreConfig {
@@ -95,25 +95,24 @@ export interface VerifySignatureInput {
 }
 
 // Reused by the server's blob HTTP handler (Phase 4) to check signed URLs.
-// Throws InvalidSignatureError on any failure.
+// Throws InvalidSignatureError on any failure. Always does the full HMAC
+// compute + timingSafeEqual before deciding expired-vs-tampered so a
+// remote observer can't distinguish the two via response timing.
 export function verifySignature(input: VerifySignatureInput): void {
   const now = input.now ?? Math.floor(Date.now() / 1000)
-  if (!Number.isFinite(input.exp) || input.exp < now) {
-    throw new InvalidSignatureError('signature expired')
-  }
   const expected = createHmac('sha256', input.signingSecret)
     .update(`${input.method}\n${input.key}\n${input.exp}`)
     .digest()
-  let provided: Buffer
-  try {
-    provided = Buffer.from(input.sig, 'hex')
-  } catch {
-    throw new InvalidSignatureError('signature is not hex')
-  }
-  if (provided.length !== expected.length) {
-    throw new InvalidSignatureError('signature length mismatch')
-  }
-  if (!timingSafeEqual(provided, expected)) {
-    throw new InvalidSignatureError('signature mismatch')
+  // Pad/truncate provided to `expected.length` so timingSafeEqual never
+  // throws on length, and the compare runs in constant time regardless of
+  // what the caller supplied. The padded buffer is only used for the
+  // compare; mismatched length still fails the compare.
+  const rawProvided = Buffer.from(input.sig, 'hex')
+  const provided = Buffer.alloc(expected.length)
+  rawProvided.copy(provided, 0, 0, Math.min(rawProvided.length, expected.length))
+  const sigOk = timingSafeEqual(provided, expected) && rawProvided.length === expected.length
+  const notExpired = Number.isFinite(input.exp) && input.exp >= now
+  if (!sigOk || !notExpired) {
+    throw new InvalidSignatureError('invalid signature')
   }
 }

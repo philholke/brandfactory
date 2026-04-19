@@ -16,6 +16,7 @@
     "@supabase/supabase-js": "^2.45.4"
   },
   "devDependencies": {
+    "@types/node": "^22.9.0",
     "vitest": "^2.1.8"
   }
 }

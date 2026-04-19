@@ -95,6 +95,18 @@ export const EnvSchema = z
       case 'ollama':
         // No required vars — ollama defaults to http://127.0.0.1:11434.
         break
+      default: {
+        // Belt + suspenders for the `satisfies` guard above: if
+        // `LLMProviderId` widens in adapter-llm and someone forgets to add
+        // a case here, TS fails this assignment *and* runtime boot fails
+        // loudly rather than silently skipping validation.
+        const _exhaustive: never = env.LLM_PROVIDER
+        ctx.addIssue({
+          code: 'custom',
+          path: ['LLM_PROVIDER'],
+          message: `unhandled LLM_PROVIDER: ${String(_exhaustive)}`,
+        })
+      }
     }
   })
 

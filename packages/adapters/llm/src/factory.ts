@@ -24,6 +24,12 @@ export interface LLMProviderDeps {
   buildOllama?: (config: { baseURL?: string }) => ProviderFactory
 }
 
+// Each AI-SDK provider returns a per-provider model type that is
+// structurally compatible with AI-SDK core's `LanguageModel` but is not
+// the same nominal type (per-provider types extend / specialize the
+// core interface). The `as unknown as LanguageModel` cast here is the
+// documented seam between per-provider shapes and the core surface —
+// revisit if AI-SDK exposes a direct `asLanguageModel(...)` helper.
 const defaultDeps: Required<LLMProviderDeps> = {
   buildAnthropic: ({ apiKey }) => {
     const provider = createAnthropic({ apiKey })

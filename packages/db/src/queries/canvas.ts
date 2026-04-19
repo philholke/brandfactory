@@ -18,6 +18,12 @@ export async function getCanvasByProject(projectId: ProjectId): Promise<Canvas |
   return row ? rowToCanvas(row) : null
 }
 
+export async function createCanvas(projectId: ProjectId): Promise<Canvas> {
+  const [row] = await db.insert(canvases).values({ projectId }).returning()
+  if (!row) throw new Error('createCanvas returned no row')
+  return rowToCanvas(row)
+}
+
 export async function listActiveBlocks(canvasId: CanvasId): Promise<CanvasBlock[]> {
   const rows = await db
     .select()

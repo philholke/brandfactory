@@ -162,8 +162,13 @@ S3, local disk, or OIDC auth is an isolated change.
 
 Ports (minimum initial set):
 
-- `AuthProvider` — `verifyToken`, `getUser`, `listUsers`
-- `BlobStore` — `put`, `get`, `getSignedUrl`, `delete`
+- `AuthProvider` — `verifyToken`, `getUserById`. Listing users is DB
+  territory (`@brandfactory/db.listUsersByWorkspace` etc.), not an
+  identity-provider concern, so it does not live on this port. See the
+  Phase 3 completion record for the decision.
+- `BlobStore` — `put`, `get`, `delete`, `getSignedReadUrl`,
+  `getSignedWriteUrl` (signed URLs are the transport for both reads and
+  writes so the server can stay out of the byte path).
 - `RealtimeBus` — `publish(channel, event)`, `subscribe(channel, handler)`
 - `LLMProvider` — factory returning a configured AI SDK model based on
   user/workspace settings (OpenRouter, Anthropic native, OpenAI, Ollama,

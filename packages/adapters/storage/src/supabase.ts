@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream'
+import { type Readable } from 'node:stream'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { type BlobBody, type BlobStore, BlobNotFoundError } from './port'
 

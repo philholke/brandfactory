@@ -11,18 +11,32 @@ export default tseslint.config(
       '**/out/**',
       '**/coverage/**',
       '**/.turbo/**',
+      '**/drizzle/**',
       '**/*.config.js',
       '**/*.config.cjs',
       '**/*.config.mjs',
+      '**/*.config.ts',
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     rules: {
       '@typescript-eslint/no-unused-vars': [
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
     },
   },

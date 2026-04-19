@@ -5,10 +5,191 @@ below, with full detail further down.
 
 ## Index
 
+- **0.4.1** — 2026-04-19 — Pre-Phase-4 cleanup: tighter env exhaustiveness, server-grade ESLint (type-aware with `no-floating-promises`), timing-safe `verifySignature`, RFC-4122 v4 UUID regex, `createCanvas` helper, three new env tests, architecture doc drift fixed.
 - **0.4.0** — 2026-04-19 — Phase 3: four `@brandfactory/adapter-*` packages land with ports + default impls, `@brandfactory/server` gains `loadEnv()` + `buildAdapters()`, vitest stands up across the repo with 31 unit tests green.
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.4.1 — 2026-04-19
+
+Cleanup pass surfaced by a repo-wide review after Phase 3 landed. No new
+surface area, no phase progression — purely raising the floor before
+Phase 4 starts writing the HTTP/WS server. `pnpm test` grew from 31 to
+34 tests (two env conditional-required additions, one UUID-version
+test), all green; typecheck, lint, format clean across 9 workspaces.
+
+### Server env loader — exhaustiveness + coverage
+
+- **`packages/server/src/env.ts`** — the `LLM_PROVIDER` switch inside
+  `superRefine` now has a `default` branch with
+  `const _exhaustive: never = env.LLM_PROVIDER` + a `ctx.addIssue` that
+  reports `unhandled LLM_PROVIDER: <value>`. Why: the existing
+  `as const satisfies readonly LLMProviderId[]` guard catches
+  *syntactic* drift between the schema's enum tuple and
+  `adapter-llm`'s `LLMProviderId`, but if the union widens and the
+  switch isn't updated, the previous code silently skipped
+  per-provider validation. Now a future widening fails the TS
+  assignment (compile time) *and* the env loader (runtime) — belt and
+  suspenders. How to apply: this is the standard "enum + switch"
+  exhaustiveness pattern; use it any time we have a narrowing switch
+  over a union imported from another package.
+- **`packages/server/src/env.test.ts`** — two new tests covering
+  gaps the Phase 3 suite left open:
+  - "rejects supabase storage missing all three required fields"
+    — asserts all three messages (`SUPABASE_URL`,
+    `SUPABASE_SERVICE_KEY`, `SUPABASE_STORAGE_BUCKET`) appear in the
+    single thrown error.
+  - "reports every failure in a single error when multiple
+    conditions are violated" — supabase auth + supabase storage +
+    anthropic LLM all misconfigured in one env; asserts five
+    distinct field names surface in the same error. Locks in
+    `loadEnv`'s "report every issue, not just the first" contract.
+  Test count for `env.test.ts` is now 8 (was 6).
+
+### ESLint — type-aware, server-ready
+
+- **`eslint.config.js`** — flipped parser to type-aware mode
+  (`parserOptions.projectService: true`,
+  `tsconfigRootDir: import.meta.dirname`) and added three rules:
+  - `@typescript-eslint/no-floating-promises` — Phase 4 introduces
+    async HTTP/WS handlers; a dropped promise in a route silently
+    swallows its rejection and never reaches the error middleware.
+    The rule forces every promise to be awaited, void-ed, or
+    returned.
+  - `@typescript-eslint/no-explicit-any` — prevents `any` as an
+    escape hatch; use `unknown` with a narrowing check instead.
+  - `@typescript-eslint/consistent-type-imports` with
+    `fixStyle: 'inline-type-imports'` — keeps runtime vs type-only
+    imports explicit so bundlers can drop type-only imports cleanly
+    and `verbatimModuleSyntax` doesn't surprise anyone.
+  Also extended `ignores` with `**/drizzle/**` and `**/*.config.ts`
+  so generated migration SQL and bespoke Node config files don't
+  need to sit inside a tsconfig project for the type-aware parser.
+- **`packages/adapters/storage/src/local-disk.ts`** + **`supabase.ts`**
+  — two import lines fixed by `eslint --fix` (type-only imports moved
+  to `import type`). No runtime change.
+- Intentionally *not* adopted: `@typescript-eslint/recommendedTypeChecked`
+  — it pulled in `require-await`, `no-unnecessary-type-assertion`,
+  `no-base-to-string`, and `prefer-promise-reject-errors`, which
+  collectively flagged 36 pre-existing issues across mappers, test
+  fakes, and idiomatic drizzle casts. Adopting those rules is a
+  bigger cleanup (and some of the flagged casts are load-bearing for
+  drizzle's inferred row types). We picked the three rules that pay
+  for themselves immediately and deferred the rest.
+
+### Storage — constant-time `verifySignature`
+
+- **`packages/adapters/storage/src/local-disk.ts`** — `verifySignature`
+  now always computes the HMAC and runs `timingSafeEqual` before
+  deciding expired-vs-tampered. Previously the expiry check returned
+  first, so a remote observer could theoretically distinguish
+  "signature expired" from "signature tampered" by response-time
+  delta. Not exploitable given a 15-minute TTL and the current lack
+  of a Phase 4 HTTP route to measure against, but it's
+  defense-in-depth for when that route lands. Implementation: the
+  provided sig is padded/truncated to `expected.length` so
+  `timingSafeEqual` never throws on length, then both "sig matches"
+  and "not expired" are evaluated and the function throws a single
+  `InvalidSignatureError('invalid signature')` if either fails. All
+  six existing tests still pass — they assert on the error class,
+  not the message.
+
+### Auth — RFC-4122 v4 regex
+
+- **`packages/adapters/auth/src/local.ts`** — the UUID regex now
+  requires the version nibble to be `4` and the variant nibble to be
+  one of `{8, 9, a, b}`. Previously it accepted any 128-bit hex in
+  UUID shape. Practical impact is near-zero (pg's
+  `gen_random_uuid()` only ever emits v4, so real dev tokens already
+  match), but the provider is now refusing tokens that couldn't have
+  come from our ID generator — a cheap invariant to enforce.
+- **`packages/adapters/auth/src/local.test.ts`** — `VALID_UUID`
+  updated to a valid v4 shape (`…-4333-8444-…`); added a new test
+  "verifyToken rejects a non-v4 uuid token" that uses the old
+  non-v4 shape as the negative. Test count is now 5 (was 4).
+
+### DB — `createCanvas` helper + smoke cleanup
+
+- **`packages/db/src/queries/canvas.ts`** — new
+  `createCanvas(projectId): Promise<Canvas>` helper. Parallels the
+  shape of `createWorkspace`, `createBrand`, `createProject`, etc.
+  Previously the smoke script inserted canvases via
+  `db.insert(canvases).values(...).returning()` because no helper
+  existed; Phase 4 routes would have either duplicated that boilerplate
+  or added the helper then anyway.
+- **`packages/db/scripts/smoke.ts`** — swapped the direct insert for
+  `await createCanvas(project.id)`. Removed now-unused `canvases` and
+  `db` imports. Smoke still does the same flow; it's just shorter and
+  uses the same surface Phase 4 will.
+
+### LLM factory — documented type boundary
+
+- **`packages/adapters/llm/src/factory.ts`** — added a short block
+  comment above `defaultDeps` explaining the
+  `as unknown as LanguageModel` cast: per-provider AI-SDK return
+  types are structurally compatible with but not nominally equal to
+  `LanguageModel`, so the cast is the intentional boundary between
+  per-provider shapes and the AI-SDK core surface. Removes the
+  "why is this cast here" question from future readers; revisit if
+  AI-SDK exposes a direct helper for this conversion.
+
+### Scaffold comments — `web` and `agent`
+
+- **`packages/web/src/index.ts`** — `export {}` preserved, one-line
+  comment added above: `// Scaffold. Real entry point (Vite + React)
+  lands in Phase 7.`
+- **`packages/agent/src/index.ts`** — same treatment with a Phase 5
+  pointer. Stops the "is this broken or intentionally empty"
+  confusion on first read.
+
+### @types/node — explicit per-package devDeps
+
+- Added `@types/node@^22.9.0` to the devDependencies of every
+  workspace that declares `"types": ["node"]` in its tsconfig:
+  `@brandfactory/db`, `@brandfactory/server`,
+  `@brandfactory/adapter-auth`, `@brandfactory/adapter-storage`,
+  `@brandfactory/adapter-realtime`, `@brandfactory/adapter-llm`.
+  Previously these resolved via pnpm's hoisting of the root-level
+  devDep, which worked but made the dependency implicit. Now the
+  graph is self-describing: every package that imports `node:crypto`,
+  `node:fs/promises`, `NodeJS.ProcessEnv`, etc. declares its node
+  types dep directly. `@brandfactory/shared` deliberately skipped
+  — its tsconfig doesn't list node types and its source doesn't
+  import from `node:*`.
+
+### Architecture doc — AuthProvider + BlobStore sketches
+
+- **`docs/architecture.md`** — the ports sketch under
+  `packages/adapters` now reflects the shipped Phase 3 surface:
+  - `AuthProvider` is `verifyToken, getUserById` (was
+    `verifyToken, getUser, listUsers`). Listing users is DB
+    territory, not an identity-provider concern — spelled out in the
+    body with a pointer to the Phase 3 completion record.
+  - `BlobStore` is `put, get, delete, getSignedReadUrl,
+    getSignedWriteUrl` (was `put, get, getSignedUrl, delete`) with
+    a one-line note that signed URLs are the transport for both
+    reads and writes, so the server can stay out of the byte path.
+  This closes the "architecture doc updates owed" item in
+  `docs/completions/phase3.md`.
+
+### Verification
+
+All green:
+
+```
+pnpm install       ✔
+pnpm test          ✔  8 files, 34 tests pass
+pnpm typecheck     ✔  9/9 workspaces pass
+pnpm lint          ✔  0 problems (with type-aware + 3 new rules)
+pnpm format:check  ✔  all files clean
+```
+
+Outstanding zod peer-dep warnings (`@ai-sdk/*`, `@openrouter/*`, `ai`,
+`ollama-ai-provider` all want `zod@^3.x`; we run `zod@^4.3`) are
+unchanged and documented in 0.4.0 — still harmless in our usage.
 
 ---
 

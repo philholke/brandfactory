@@ -3,7 +3,9 @@ import type { User } from '@brandfactory/db'
 import { createLocalAuthProvider } from './local'
 import { InvalidTokenError } from './port'
 
-const VALID_UUID = '11111111-2222-3333-4444-555555555555'
+// RFC-4122 v4 shape: version nibble '4', variant nibble ∈ {8,9,a,b}.
+const VALID_UUID = '11111111-2222-4333-8444-555555555555'
+const WRONG_VERSION_UUID = '11111111-2222-3333-4444-555555555555' // v3 shape
 
 function makeUser(id: string, overrides: Partial<User> = {}): User {
   return {
@@ -28,6 +30,11 @@ describe('createLocalAuthProvider', () => {
   it('verifyToken rejects a non-uuid token', async () => {
     const auth = createLocalAuthProvider({ getUserById: async () => null })
     await expect(auth.verifyToken('not-a-uuid')).rejects.toBeInstanceOf(InvalidTokenError)
+  })
+
+  it('verifyToken rejects a non-v4 uuid token', async () => {
+    const auth = createLocalAuthProvider({ getUserById: async () => null })
+    await expect(auth.verifyToken(WRONG_VERSION_UUID)).rejects.toBeInstanceOf(InvalidTokenError)
   })
 
   it('verifyToken rejects when user is missing', async () => {

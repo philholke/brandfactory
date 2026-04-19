@@ -15,13 +15,12 @@
 
 import {
   appendCanvasEvent,
-  canvases,
   createBlock,
   createBrand,
+  createCanvas,
   createProject,
   createUser,
   createWorkspace,
-  db,
   getShortlistView,
   listBlockEvents,
   pool,
@@ -85,7 +84,7 @@ async function main() {
   })
   console.log(`  sections   ${voiceSection.id}, ${audienceSection.id}`)
 
-  // Freeform project + canvas (canvases inserted directly — no query helper yet)
+  // Freeform project + canvas
   const project = await createProject({
     kind: 'freeform',
     brandId: brand.id as BrandId,
@@ -93,9 +92,8 @@ async function main() {
   })
   console.log(`  project    ${project.id}`)
 
-  const [canvasRow] = await db.insert(canvases).values({ projectId: project.id }).returning()
-  assert(canvasRow, 'canvas insert returned no row')
-  const canvasId = canvasRow.id as CanvasId
+  const canvas = await createCanvas(project.id as ProjectId)
+  const canvasId = canvas.id as CanvasId
   console.log(`  canvas     ${canvasId}`)
 
   // Text block, pinned (setPinned after create so pinnedAt is stamped)
