@@ -11,6 +11,7 @@ export default defineConfig({
       'packages/adapters/storage',
       'packages/adapters/realtime',
       'packages/adapters/llm',
+      'packages/agent',
       'packages/server',
     ],
   },

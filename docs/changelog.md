@@ -5,6 +5,7 @@ below, with full detail further down.
 
 ## Index
 
+- **0.6.0** — 2026-04-19 — Phase 5: `@brandfactory/agent` ships `streamResponse` over an injected `CanvasOpApplier`, plus a four-item hardening pass (realtime subscribe race, `BLOB_MAX_BYTES` 413, two LOW cleanups). 106 tests.
 - **0.5.1** — 2026-04-19 — Post-Phase-4 cleanup: project+canvas tx helper, `LLMProviderId` single-sourced in shared, trust-boundary validation on `workspace_settings`, discriminated `RealtimeAdapter` (no `as` cast in `main.ts`), `BlobNotFoundError` `instanceof`, atomic `updateBrandGuidelines` helper.
 - **0.5.0** — 2026-04-19 — Phase 4: `@brandfactory/server` ships a bootable Hono-on-`@hono/node-server` HTTP surface with WS upgrade at `/rt`, conditional `/blobs` mount, request-id → logger → auth → validator → handler → onError middleware chain, six route modules, `workspace_settings` table, and 49 new vitest cases (83 total).
 - **0.4.1** — 2026-04-19 — Pre-Phase-4 cleanup: tighter env exhaustiveness, server-grade ESLint (type-aware with `no-floating-promises`), timing-safe `verifySignature`, RFC-4122 v4 UUID regex, `createCanvas` helper, three new env tests, architecture doc drift fixed.
@@ -12,6 +13,337 @@ below, with full detail further down.
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.6.0 — 2026-04-19
+
+Phase 5 lands `@brandfactory/agent` — a server-only orchestration
+library that turns `(brand, canvas, user message) → streamed
+AgentEvent[]`. Same release rolls in a four-item hardening pass
+surfaced by a repo-wide review of phases 0–5: one HIGH (realtime
+subscribe race), one MEDIUM (unbounded blob PUT body), two LOW
+(redundant DB predicate, overlapping shared union). `pnpm test` grew
+from 83 (0.5.1) to 106 (+20 from the agent package, +3 from the
+hardenings); typecheck, lint, format clean across 9 workspaces.
+
+### Phase 5 — `@brandfactory/agent`
+
+A pure-orchestration library. **It never talks to the DB, the realtime
+bus, or an HTTP surface directly** — all side effects flow through an
+injected `CanvasOpApplier`. Phase 6's `POST /projects/:id/agent` route
+implements that interface against the real persistence layer and
+forwards the resulting events to SSE + the realtime bus.
+
+#### Package wiring
+
+- **`packages/agent/package.json`** — new package. Deps:
+  `@brandfactory/shared`, `@brandfactory/adapter-llm` (both
+  `workspace:*`), `ai ^4.0.20` (kept in lockstep with adapter-llm so
+  the shared `LanguageModel` type references exactly one copy of
+  `ai`), `zod ^4.3.6`. Dev-deps: `@types/node`, `tsx`, `vitest`.
+  Scripts: `typecheck`, `lint`, `test` (`vitest run`), `smoke` (`tsx
+  scripts/smoke.ts`).
+- **`packages/agent/vitest.config.ts`** — projects-mode entry,
+  mirrors the other packages so `pnpm --filter @brandfactory/agent
+  test` and the root `pnpm test` behave identically.
+- **`packages/agent/tsconfig.json`** — `include` widened to
+  `['src/**/*.ts', 'scripts/**/*.ts']` and `rootDir: src` dropped, so
+  `scripts/smoke.ts` participates in the TS project (otherwise
+  type-aware ESLint fails with "was not found by the project
+  service").
+- **Root `vitest.config.ts`** — appended `packages/agent` to the
+  `projects` list.
+
+#### Prompt assembly — system + canvas context
+
+- **`packages/agent/src/prompts/prose-mirror-to-text.ts`** —
+  `proseMirrorDocToPlainText(doc)`. Walks a ProseMirror / TipTap JSON
+  tree and flattens it. Block-level node types (paragraph, heading,
+  list_item, blockquote, code_block, bullet_list, ordered_list,
+  horizontal_rule — both snake_case and camelCase spellings)
+  produce their own block, joined with `\n\n`; inline text nodes
+  concatenate. Deliberately lossy: marks (bold/italic/links) are
+  dropped because the model doesn't need them and stripping them
+  keeps the prompt compact.
+- **`packages/agent/src/prompts/system-prompt.ts`** —
+  `buildSystemPrompt(brand: BrandWithSections): string`. Fixed
+  composition order: role preamble → `# Brand: <name>` (+
+  description if set) → `## Brand guidelines` (sections rendered in
+  ascending `priority` order; block skipped when zero sections) →
+  `## Canvas awareness` paragraph naming the three tools so the
+  model can reason about intent. Tests pin structural invariants but
+  not exact wording, so future wordsmithing doesn't break the suite.
+- **`packages/agent/src/prompts/canvas-context.ts`** —
+  `buildCanvasContext({ blocks, shortlistBlockIds, recentOps? }):
+  string`. Renders `CANVAS STATE` block with `PINNED:` /
+  `UNPINNED:` lists; unpinned items truncated at
+  `CANVAS_CONTEXT_UNPINNED_LIMIT = 20` (exported for Phase 6
+  tuning) with an `… and K more` tail. `RECENT OPS:` block rendered
+  only when non-empty. `summarizeBlock` branches text /
+  image / file: text is plain-text-flattened, whitespace-collapsed,
+  truncated at 200 chars; image is `[image: <alt|"untitled">]
+  (W×H)?`; file is `[file: <name>] (<mime>)`. Pure / deterministic /
+  memoizable.
+
+#### Canvas tools + `CanvasOpApplier` (the side-effect seam)
+
+- **`packages/agent/src/tools/applier.ts`** — `CanvasOpApplier`
+  interface: `addCanvasBlock(input)`, `pinBlock(blockId)`,
+  `unpinBlock(blockId)`. v1 `AddCanvasBlockInput` is `{ kind:
+  'text', body: ProseMirrorDoc, position: number }` — image/file
+  variants intentionally deferred (both need a `blobKey` from the
+  separate upload flow, not minted by the agent). Every method
+  returns the applied `CanvasBlock` so the stream layer can
+  synthesize the `canvas-op`/`pin-op` event without a second DB
+  round-trip.
+- **`packages/agent/src/tools/definitions.ts`** —
+  `buildCanvasTools(applier, opts?)`. Three AI-SDK tools
+  (`add_canvas_block`, `pin_block`, `unpin_block`) whose parameter
+  schemas reuse `ProseMirrorDocSchema` / `CanvasBlockIdSchema` from
+  shared (no redefinition). Each `execute` returns a compact `{
+  blockId, isPinned }` so the model reasons about what happened
+  without leaking full rows into the conversation. Tool names
+  exported via `CANVAS_TOOL_NAMES`. **Internal `onApplied` hook**:
+  `opts.onApplied?(toolCallId, event)` fires after the applier
+  returns, passing the AI-SDK's `toolCallId` and a pre-shaped
+  `CanvasOpEvent`/`PinOpEvent` — this is the hook `streamResponse`
+  uses to correlate tool-results to canvas-op events. External
+  callers that just want the `ToolSet` (e.g. a Phase-6 authz
+  introspector) pass no opts.
+
+#### `streamResponse` — the entry point
+
+- **`packages/agent/src/stream.ts`** — `streamResponse(input):
+  AsyncIterable<AgentEvent>`. Builds system-prompt + canvas-context
+  and concatenates as `system + '\n\n' + canvasContext` (the
+  context is prepended to system, not injected as a user message,
+  so the model treats it as static context); builds tools with the
+  `onApplied` hook that stores events in a
+  `Map<toolCallId, event>`; translates `AgentMessage[]` → AI-SDK
+  `CoreMessage[]`; calls `streamText({ model, system, messages,
+  tools, abortSignal })`; consumes `result.fullStream` as an async
+  generator yielding typed `AgentEvent`s. Buffer flush points:
+  `text-delta` accumulates and lazily allocates an assistant
+  message id (`randomUUID()`); `tool-call` flushes pending text
+  then yields a `tool-call` event; `tool-result` looks up the
+  pending event by `toolCallId` and yields it; `step-finish` /
+  `finish` flush text; `error` re-throws out of the generator.
+  Trailing `takeMessage()` after the loop covers the case where
+  the upstream stream ended without a finish part.
+  - **Widened local stream-part type.** AI-SDK exports
+    `TextStreamPart<TOOLS>`; with `TOOLS` inferred as the generic
+    `ToolSet`, the `tool-call` / `tool-result` arms narrow to
+    `never`. A local `AgentStreamPart` union redeclares the minimal
+    shape we consume plus an explicit "other kinds" arm
+    (`reasoning` / `source` / `file` / `step-start` /
+    `tool-call-streaming-*`) so the `switch` stays exhaustive
+    without a default-case never-guard. Runtime behaviour is
+    unchanged — purely a TS-side workaround for v4 inference. The
+    only `as` cast in the package (`as unknown as
+    AsyncIterable<AgentStreamPart>`) is documented in-place.
+  - **Message-id allocation.** Phase 5 mints assistant message ids
+    locally (uuid v4). Phase 6 is free to regenerate them DB-side
+    on persist — the id is opaque before that point, no conflict.
+
+#### Barrel + smoke
+
+- **`packages/agent/src/index.ts`** — re-exports only the public
+  surface: `streamResponse`, `StreamResponseInput`,
+  `buildSystemPrompt`, `buildCanvasContext`,
+  `BuildCanvasContextInput`, `CANVAS_CONTEXT_UNPINNED_LIMIT`,
+  `buildCanvasTools`, `CANVAS_TOOL_NAMES`, `CanvasOpApplier`,
+  `AddCanvasBlockInput`. Internal helpers and the widened
+  stream-part type stay private. No `**/*` globs in `exports`.
+- **`packages/agent/scripts/smoke.ts`** — drives `streamResponse`
+  against a real openrouter-backed `LLMProvider` with an in-memory
+  `InMemoryApplier` that records every mutation. Hard-coded
+  "Northstar Coffee" `BrandWithSections` (voice + audience), two
+  seed canvas blocks (one pinned, one draft), single user message
+  asking for three taglines via `add_canvas_block` then a pin.
+  Prints each event as it arrives. Exits 0 on success, 1 if the
+  script fatals, 2 if the run completed but the applier never
+  received an `add_canvas_block` call (signal: model doesn't
+  tool-use reliably, not a bug in the package). Gated on
+  `OPENROUTER_API_KEY` — missing key is a clear error + exit 1, not
+  a mid-stream failure.
+
+#### Tests (Phase 5)
+
+20 new vitest cases, all deterministic / no network:
+
+- `prompts/prose-mirror-to-text.test.ts` — 6 cases: paragraph;
+  paragraph + heading; bullet list; nested list; inline text runs;
+  empty doc.
+- `prompts/system-prompt.test.ts` — 2 cases: happy path (brand
+  name, description, section labels in priority order, plain-text
+  bodies, no raw JSON); brand with zero sections (canvas-awareness
+  block still rendered, guidelines block skipped).
+- `prompts/canvas-context.test.ts` — 4 cases: empty canvas (both
+  placeholders); pinned/unpinned split across text/image/file;
+  unpinned truncation + "and K more" tail; RECENT OPS rendering.
+- `tools/tools.test.ts` — 5 cases: exposed tool names; each tool's
+  `execute` forwards args to the applier and returns compact JSON;
+  zod rejects bad input before any applier call.
+- `stream.test.ts` — 3 cases driven by a hand-rolled
+  `LanguageModelV1` fake: plain text-delta stream → single
+  assistant `message` event; text-delta → tool-call → synthesized
+  `canvas-op` (asserts both event order AND that the applier was
+  called with decoded args); upstream `error` part → generator
+  throws with the original message.
+
+The fake `LanguageModel` implements only the slice `streamText`
+actually touches (`specificationVersion`, `provider`, `modelId`,
+`defaultObjectGenerationMode`, `supportsImageUrls`,
+`supportsStructuredOutputs`, `doGenerate` (throws), `doStream`).
+Cast through `as unknown as LanguageModel` — the AI-SDK doesn't
+export a test helper.
+
+#### Phase 5 non-goals (reaffirmed)
+
+Deliberately out of scope; Phase 6 or later: route in
+`@brandfactory/server`, persistence, realtime publish, workspace-
+settings resolution (caller passes `{ providerId, modelId }` in
+`llmSettings`), assistant-message persistence, rate-limit /
+concurrency-guard.
+
+---
+
+### Post-Phase-5 hardening pass
+
+Same review cadence as 0.4.1 / 0.5.1. Four items surfaced by a
+repo-wide audit of phases 0–5; all four landed in this release so
+Phase 6 starts on a clean floor. Three are tiny / boundary-only;
+one (the realtime subscribe race) is the kind of latent bug that
+Phase 6's high-rate text-delta fan-out would have surfaced as
+"every token shows up twice in the canvas".
+
+#### Realtime — same-tick subscribe race (HIGH)
+
+`adapter-realtime/native-ws.ts` previously did the dedup check
+synchronously (`if (unsubscribers.has(msg.channel)) return`) but
+populated the unsubscribers map only after `opts.authorize`
+resolved. Two `subscribe` messages for the same channel arriving
+in the same tick both passed the dedup check, both awaited
+authorize, and both registered a handler — the client then
+received every event N times for N rapid duplicates. Phase 6
+fans agent text-deltas through this bus at high rate and any
+client that re-subscribes on reconnect / visibility-change can
+trigger it.
+
+- **`packages/adapters/realtime/src/native-ws.ts`** — stake a
+  placeholder unsubscribe in the map *before* awaiting authorize.
+  After authorize: if denied AND the slot still holds the
+  placeholder, delete it; if the socket closed mid-await (the
+  `close` handler clears the map), bail out. Otherwise replace
+  the placeholder with the real unsubscribe. Single-tick dedup
+  now works because the map is mutated synchronously on the first
+  subscribe.
+- **`packages/adapters/realtime/src/native-ws.test.ts`** — new
+  case: fire two `subscribe` messages for the same channel
+  back-to-back with an async `authorize` that takes 25ms; assert
+  `authorize` runs exactly once and a single `publish` arrives at
+  the client exactly once. Without the placeholder, both
+  assertions fail.
+
+#### Blobs — `BLOB_MAX_BYTES`-gated 413 (MEDIUM)
+
+`PUT /blobs/:key` previously called `c.req.arrayBuffer()` with no
+ceiling. The signed URL is short-lived and gated by HMAC, so the
+attack surface is "an authenticated client can OOM the server",
+which is small but real and trivial to exploit. Plan deferred
+content-type / max-body to Phase 8, but a max-body limit is one
+constant + one length check — splitting it from content-type and
+landing it now is cheap.
+
+- **`packages/server/src/env.ts`** — new env var `BLOB_MAX_BYTES`
+  (`z.coerce.number().int().min(1).default(25 * 1024 * 1024)`). Not
+  conditional on `STORAGE_PROVIDER` so the route can read it
+  without branching; supabase deploys simply never hit the route.
+- **`packages/server/src/routes/blobs.ts`** — `BlobsDeps` gains
+  `maxBytes: number`. PUT handler reads `content-length` first and
+  rejects with `413 BLOB_TOO_LARGE` before reading the body when
+  declared length exceeds the cap. After reading: a
+  belt-and-suspenders second check on `buf.byteLength` catches
+  clients that omit or lie about `content-length`.
+- **`packages/server/src/app.ts`** — passes
+  `deps.env.BLOB_MAX_BYTES` into `createBlobsRouter`.
+- **`packages/server/src/test-helpers.ts`** — `testEnv` defaults
+  `BLOB_MAX_BYTES: 25 * 1024 * 1024`; `createTestApp` already
+  threads `env` overrides through `createApp`, so route tests can
+  shrink the cap to 4 bytes for assertion.
+- **`.env.example`** — documents `BLOB_MAX_BYTES=26214400` with a
+  comment about the 413 path.
+- **`packages/server/src/routes/blobs.test.ts`** — two new cases:
+  PUT with `content-length: 5` against `BLOB_MAX_BYTES=4` →
+  413 (pre-read path); PUT with the same body but no
+  `content-length` header → still 413 (post-read path). Both
+  assert the storage was not written.
+
+#### DB — drop redundant `isNotNull` predicate (LOW)
+
+`db/queries/events.ts:listBlockEvents` previously did
+`where(and(eq(canvasEvents.blockId, blockId), isNotNull(canvasEvents.blockId)))`.
+The `isNotNull` is implied by the equality on a non-null parameter
+— the predicate read as if `blockId` were a nullable parameter,
+which it isn't. Cosmetic but distracting; SQL behaviour unchanged.
+
+- **`packages/db/src/queries/events.ts`** — drop the
+  `isNotNull(canvasEvents.blockId)` clause; drop the now-unused
+  `isNotNull` import. Behaviour parity preserved (existing tests
+  cover the path).
+
+#### Shared — collapse overlapping `RealtimeEventPayload` union (LOW)
+
+`shared/realtime/envelope.ts` declared
+`RealtimeEventPayloadSchema = z.union([AgentEventSchema,
+CanvasOpEventSchema, PinOpEventSchema])`. But `AgentEventSchema`
+already unions all four `AgentEvent` branches (message, tool-call,
+canvas-op, pin-op), so the trailing two branches are redundant.
+No security impact (the union accepts the same set of values
+either way), but the structure was confusing — and would eventually
+mislead a reader who assumed the trailing branches existed for a
+reason.
+
+- **`packages/shared/src/realtime/envelope.ts`** —
+  `RealtimeEventPayloadSchema = AgentEventSchema` (re-aliased so
+  call sites read as wire-protocol code, not agent-internals
+  code). `RealtimeEventPayload` type unchanged. Two import
+  symbols (`CanvasOpEventSchema`, `PinOpEventSchema`) dropped from
+  the file's import line.
+
+### Items still on the deferral list
+
+Same review surfaced these; each has a natural home in a later
+phase, none block Phase 6:
+
+- WS `?token=` query fallback exposure to upstream proxy logs —
+  Phase 7 CORS + cookie-based ticket flow.
+- Logger redaction for tokens / secrets — Phase 8 swap to pino.
+- Blobs PUT content-type persistence — Phase 8 polish (content-
+  type already accepted on the request, just not stored alongside
+  bytes).
+- 404 vs 403 ordering on `GET /brands/:id` and friends —
+  consistent across routes, matches the WS `authorizeChannel`
+  walk; product call to revisit.
+- Live WS upgrade end-to-end test, live HTTP/WS boot smoke
+  transcript — needs Postgres + Docker; held over from Phase 4.
+- `update_block` / `remove_block` agent tools — re-open after we
+  see what the model tries to do.
+- Image / file canvas tool variants — needs the agent-side story
+  for obtaining a `blobKey`.
+
+### Verification
+
+```
+pnpm install        ✔  lockfile updated, no new peer-dep categories
+pnpm typecheck      ✔  9/9 workspaces pass
+pnpm lint           ✔  0 problems
+pnpm format:check   ✔  all files clean
+pnpm test           ✔  24 files, 106 tests pass (was 24 / 103)
+pnpm --filter @brandfactory/agent smoke
+                    ☐  run locally with OPENROUTER_API_KEY set
+```
 
 ---
 

@@ -86,11 +86,26 @@ export function createNativeWsRealtimeBus(): NativeWsRealtimeBus {
 
       if (msg.type === 'subscribe') {
         if (unsubscribers.has(msg.channel)) return
+        // Stake the slot synchronously before awaiting authorize. Two
+        // `subscribe` messages for the same channel arriving in the same tick
+        // would otherwise both pass the dedup check and both register a
+        // handler — the client would then receive every event twice. The
+        // placeholder is replaced with the real unsubscribe once the handler
+        // is registered, or deleted if authorize denies.
+        const PLACEHOLDER = () => {}
+        unsubscribers.set(msg.channel, PLACEHOLDER)
         const proceed = async () => {
           if (opts.authorize) {
             const ok = await opts.authorize({ userId: userId!, channel: msg.channel })
-            if (!ok) return
+            if (!ok) {
+              if (unsubscribers.get(msg.channel) === PLACEHOLDER) {
+                unsubscribers.delete(msg.channel)
+              }
+              return
+            }
           }
+          // Socket may have closed during the await — `close` clears the map.
+          if (unsubscribers.get(msg.channel) !== PLACEHOLDER) return
           const off = subscribe(msg.channel, (event) => {
             const out: RealtimeServerMessage = {
               type: 'event',

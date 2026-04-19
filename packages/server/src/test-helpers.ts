@@ -255,6 +255,7 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     BLOB_LOCAL_DISK_ROOT: '/tmp/blobs',
     BLOB_SIGNING_SECRET: 'test-secret',
     BLOB_PUBLIC_BASE_URL: 'http://localhost:3001/blobs',
+    BLOB_MAX_BYTES: 25 * 1024 * 1024,
     ANTHROPIC_API_KEY: 'ak',
     PORT: 3001,
     HOST: '0.0.0.0',

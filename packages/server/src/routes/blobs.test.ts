@@ -94,6 +94,43 @@ describe('blobs routes', () => {
     expect(res.status).toBe(400)
   })
 
+  it('PUT with content-length over BLOB_MAX_BYTES → 413', async () => {
+    const { store, written } = buildStorage()
+    const { app } = createTestApp({
+      storage: store,
+      env: { BLOB_MAX_BYTES: 4 },
+    })
+    const key = 'too-big.bin'
+    const exp = Math.floor(Date.now() / 1000) + 60
+    const sig = sign('PUT', key, exp, SECRET)
+    const res = await app.request(`/blobs/${key}?exp=${exp}&sig=${sig}`, {
+      method: 'PUT',
+      body: new Uint8Array([1, 2, 3, 4, 5]),
+      headers: { 'content-length': '5' },
+    })
+    expect(res.status).toBe(413)
+    expect(written.has(key)).toBe(false)
+  })
+
+  it('PUT with body over BLOB_MAX_BYTES (no content-length) → 413', async () => {
+    // Belt + suspenders path: client lies about / omits content-length but the
+    // body is still too big. The post-read check catches it.
+    const { store, written } = buildStorage()
+    const { app } = createTestApp({
+      storage: store,
+      env: { BLOB_MAX_BYTES: 4 },
+    })
+    const key = 'too-big-2.bin'
+    const exp = Math.floor(Date.now() / 1000) + 60
+    const sig = sign('PUT', key, exp, SECRET)
+    const res = await app.request(`/blobs/${key}?exp=${exp}&sig=${sig}`, {
+      method: 'PUT',
+      body: new Uint8Array([1, 2, 3, 4, 5]),
+    })
+    expect(res.status).toBe(413)
+    expect(written.has(key)).toBe(false)
+  })
+
   it('not mounted when STORAGE_PROVIDER=supabase', async () => {
     const { app } = createTestApp({
       env: {

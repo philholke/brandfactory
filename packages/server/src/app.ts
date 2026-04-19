@@ -69,6 +69,7 @@ export function createApp(deps: AppDeps) {
         // `!` is safe: `STORAGE_PROVIDER=local-disk` conditionally-requires
         // `BLOB_SIGNING_SECRET` per env.ts's `superRefine`.
         signingSecret: deps.env.BLOB_SIGNING_SECRET!,
+        maxBytes: deps.env.BLOB_MAX_BYTES,
       }),
     )
   }

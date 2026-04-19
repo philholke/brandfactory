@@ -118,7 +118,30 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)
 
-  packages/agent: {}
+  packages/agent:
+    dependencies:
+      '@brandfactory/adapter-llm':
+        specifier: workspace:*
+        version: link:../adapters/llm
+      '@brandfactory/shared':
+        specifier: workspace:*
+        version: link:../shared
+      ai:
+        specifier: ^4.0.20
+        version: 4.3.19(react@19.2.5)(zod@4.3.6)
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.17
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)
 
   packages/db:
     dependencies:

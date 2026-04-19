@@ -124,6 +124,49 @@ describe('native-ws realtime bus', () => {
     c.close()
   })
 
+  it('dedups same-tick subscribes to the same channel (no double-fan-out)', async () => {
+    // Authorize is async, so the second subscribe arrives before the first
+    // resolves. Without the placeholder-stake guard, both would register a
+    // handler and the client would receive every published event twice.
+    const bus = createNativeWsRealtimeBus()
+    const http = createServer()
+    const wss = new WebSocketServer({ server: http })
+    let authorizeCalls = 0
+    bus.bindToNodeWebSocketServer(wss, {
+      authenticate: () => 'user-1',
+      authorize: async () => {
+        authorizeCalls += 1
+        await new Promise((r) => setTimeout(r, 25))
+        return true
+      },
+    })
+    await new Promise<void>((r) => http.listen(0, '127.0.0.1', r))
+    const addr = http.address()
+    if (addr === null || typeof addr === 'string') throw new Error('no address')
+    const url = `ws://127.0.0.1:${addr.port}`
+    cleanups.push(async () => {
+      await new Promise<void>((r) => wss.close(() => r()))
+      await new Promise<void>((r) => http.close(() => r()))
+    })
+
+    const c = await makeClient(url)
+    c.send(JSON.stringify({ type: 'subscribe', channel: 'dup' }))
+    c.send(JSON.stringify({ type: 'subscribe', channel: 'dup' }))
+    // Wait for both authorize promises to resolve.
+    await new Promise((r) => setTimeout(r, 75))
+
+    const received: unknown[] = []
+    c.on('message', (raw) => received.push(JSON.parse(raw.toString())))
+    await bus.publish('dup', helloEvent)
+    await new Promise((r) => setTimeout(r, 25))
+
+    // Second subscribe is staked-out by the placeholder, so authorize runs
+    // exactly once and the handler is registered exactly once.
+    expect(authorizeCalls).toBe(1)
+    expect(received).toHaveLength(1)
+    c.close()
+  })
+
   it('rejects connections that fail authentication', async () => {
     const { url } = await startBus({ authenticate: () => null })
     const ws = new WebSocket(url)

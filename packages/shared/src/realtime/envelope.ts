@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { AgentEventSchema, CanvasOpEventSchema, PinOpEventSchema } from '../agent/events'
+import { AgentEventSchema } from '../agent/events'
 
 // Outer wire envelope spoken between the browser and the server's WS
 // endpoint. Lives in shared so both `web` and `server` can validate the
@@ -9,11 +9,11 @@ import { AgentEventSchema, CanvasOpEventSchema, PinOpEventSchema } from '../agen
 export const RealtimeChannelSchema = z.string().min(1)
 export type RealtimeChannel = z.infer<typeof RealtimeChannelSchema>
 
-export const RealtimeEventPayloadSchema = z.union([
-  AgentEventSchema,
-  CanvasOpEventSchema,
-  PinOpEventSchema,
-])
+// `AgentEventSchema` already unions `AgentMessage | AgentToolCall |
+// CanvasOpEvent | PinOpEvent`, so the realtime payload is exactly the agent
+// event — re-aliased here so call sites read as wire-protocol code, not
+// agent-internals code.
+export const RealtimeEventPayloadSchema = AgentEventSchema
 export type RealtimeEventPayload = z.infer<typeof RealtimeEventPayloadSchema>
 
 export const RealtimeSubscribeMessageSchema = z.object({

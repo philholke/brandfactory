@@ -8,6 +8,7 @@ import { ForbiddenError, HttpError } from '../errors'
 export interface BlobsDeps {
   storage: BlobStore
   signingSecret: string
+  maxBytes: number
 }
 
 const KeyParam = z.object({ key: z.string().min(1) })
@@ -53,7 +54,21 @@ export function createBlobsRouter(deps: BlobsDeps) {
       } catch {
         throw new ForbiddenError('invalid signature')
       }
+      // Reject obviously oversized uploads before reading any bytes. A
+      // signed-URL holder is authenticated, so the realistic risk is OOM
+      // rather than abuse, but the check is one line.
+      const declared = c.req.header('content-length')
+      if (declared !== undefined) {
+        const n = Number(declared)
+        if (Number.isFinite(n) && n > deps.maxBytes) {
+          throw new HttpError(413, 'BLOB_TOO_LARGE', `blob exceeds ${deps.maxBytes} bytes`)
+        }
+      }
       const buf = await c.req.arrayBuffer()
+      // Belt + suspenders for clients that omit / lie about `content-length`.
+      if (buf.byteLength > deps.maxBytes) {
+        throw new HttpError(413, 'BLOB_TOO_LARGE', `blob exceeds ${deps.maxBytes} bytes`)
+      }
       const bytes = new Uint8Array(buf)
       const contentType = c.req.header('content-type') ?? undefined
       await deps.storage.put(key, bytes, contentType ? { contentType } : undefined)

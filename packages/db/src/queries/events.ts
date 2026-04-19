@@ -1,5 +1,5 @@
 import type { CanvasBlockId, CanvasId, JsonValue, UserId } from '@brandfactory/shared'
-import { and, asc, desc, eq, gt, isNotNull } from 'drizzle-orm'
+import { and, asc, desc, eq, gt } from 'drizzle-orm'
 import { db } from '../client'
 import { canvasEvents } from '../schema'
 
@@ -53,6 +53,6 @@ export async function listBlockEvents(blockId: CanvasBlockId): Promise<CanvasEve
   return db
     .select()
     .from(canvasEvents)
-    .where(and(eq(canvasEvents.blockId, blockId), isNotNull(canvasEvents.blockId)))
+    .where(eq(canvasEvents.blockId, blockId))
     .orderBy(asc(canvasEvents.createdAt))
 }

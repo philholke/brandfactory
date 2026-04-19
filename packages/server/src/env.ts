@@ -36,6 +36,15 @@ export const EnvSchema = z
     BLOB_LOCAL_DISK_ROOT: NonEmpty.optional(),
     BLOB_SIGNING_SECRET: NonEmpty.optional(),
     BLOB_PUBLIC_BASE_URL: NonEmpty.optional(),
+    // Hard cap on the request body for `PUT /blobs/:key`. Defaults to 25 MiB.
+    // Applies regardless of `STORAGE_PROVIDER` so the route can read it
+    // without a conditional. Rejected with 413 before the body is read into
+    // memory whenever `content-length` is present and over the cap.
+    BLOB_MAX_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .default(25 * 1024 * 1024),
 
     // Supabase (auth + storage share these).
     SUPABASE_URL: NonEmpty.optional(),
