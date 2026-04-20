@@ -3,7 +3,9 @@ import type { BlobStore } from '@brandfactory/adapter-storage'
 import type { LLMProvider } from '@brandfactory/adapter-llm'
 import type { RealtimeBus } from '@brandfactory/adapter-realtime'
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import type { AppEnv } from './context'
+import { parseCorsAllowedOrigins } from './cors'
 import type { Db } from './db'
 import type { Env } from './env'
 import type { Logger } from './logger'
@@ -39,6 +41,25 @@ export function createApp(deps: AppDeps) {
   const app = new Hono<AppEnv>()
   app.use('*', requestIdMiddleware())
   app.use('*', loggerMiddleware(deps.log))
+
+  // CORS gate — only mounted when `CORS_ALLOWED_ORIGINS` is set, so the
+  // single-origin dev default (Vite proxies `/api` + `/rt` → :3001) keeps
+  // behaving exactly as before. For split-origin prod (`app.example.com`
+  // vs `api.example.com`) the allowlist is strict: an unknown `Origin` is
+  // echoed as `null`, which browsers treat as a CORS failure.
+  const allowedOrigins = parseCorsAllowedOrigins(deps.env.CORS_ALLOWED_ORIGINS)
+  if (allowedOrigins) {
+    app.use(
+      '*',
+      cors({
+        origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
+        credentials: true,
+        allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowHeaders: ['content-type', 'authorization'],
+      }),
+    )
+  }
+
   app.onError(onError)
 
   // `/health` gets optional auth so an authed probe is attributable but an

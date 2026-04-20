@@ -3,32 +3,8 @@
 Vite + React 19 + Tailwind v4 + shadcn/ui frontend for BrandFactory. Split-
 screen project workspace, brand editor, settings, realtime canvas.
 
-The Phase-8 root README overhaul will pull the quickstart bits into the
-top-level doc. Until then, this file covers the frontend-specific setup.
-
-## Quickstart
-
-From the repo root:
-
-```bash
-# 1. Start Postgres (once per session).
-docker compose -f docker/compose.yaml up -d
-
-# 2. Apply DB migrations.
-pnpm -F @brandfactory/db db:migrate
-
-# 3. Copy the env templates. See "Configuration" below.
-cp .env.example .env                        # server env
-cp packages/web/.env.example packages/web/.env
-
-# 4. Boot server + web in parallel.
-pnpm dev
-# → server: http://localhost:3001
-# → web:    http://localhost:5173
-```
-
-`pnpm dev` wraps `scripts/dev.sh`, which runs both packages' own `dev`
-scripts and tears both down on Ctrl-C (or on either one crashing).
+The root [`README.md`](../../README.md) owns the first-run quickstart. This
+file covers the frontend-specific setup that lives past that.
 
 ## Configuration
 
@@ -62,16 +38,17 @@ user id. Every token must be a valid RFC-4122 v4 UUID that exists in the
 `users` table — the adapter rejects anything else with
 `InvalidTokenError`.
 
-To get a token:
+To get a token, run the dev seed once after migrating:
 
-```sql
--- psql into the dev Postgres (docker/compose.yaml exposes :5432).
-INSERT INTO users (email) VALUES ('you@example.com') RETURNING id;
+```bash
+pnpm -F @brandfactory/db db:seed
 ```
 
-Paste the returned `id` into the `/login` form. The token lives in
-`sessionStorage` (`bf_token`) so it survives tab refreshes but not browser
-restarts — matching the dev-only profile.
+The command prints a UUID (the demo user's id) — paste that into the
+`/login` form. The token lives in `sessionStorage` (`bf_token`) so it
+survives tab refreshes but not browser restarts, matching the dev-only
+profile. The seed is idempotent: re-running it doesn't change the token or
+create duplicates.
 
 ### Supabase
 

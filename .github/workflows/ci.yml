@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-flight run when a new commit lands on the same ref (e.g. a
+# force-push to a PR). `main` runs never collide because each push is a
+# new ref revision.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: lint · typecheck · format · test
+    runs-on: ubuntu-latest
+
+    # Postgres 16 sidecar for `@brandfactory/db`'s live-DB vitest cases
+    # (currently the seed idempotency check; more land in Phase 9).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: brandfactory
+          POSTGRES_PASSWORD: brandfactory
+          POSTGRES_DB: brandfactory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U brandfactory -d brandfactory"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgres://brandfactory:brandfactory@localhost:5432/brandfactory
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm before setup-node so `cache: 'pnpm'` can locate the binary
+      # and hash `pnpm-lock.yaml`. Version comes from the root
+      # `package.json`'s `packageManager` field.
+      - uses: pnpm/action-setup@v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Apply DB migrations
+        run: pnpm -F @brandfactory/db db:migrate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Test
+        run: pnpm test

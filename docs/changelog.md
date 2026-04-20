@@ -4,6 +4,7 @@ Latest releases at the top. Each version has a one-line entry in the index below
 
 ## Index
 
+- **0.8.0** — 2026-04-20 — Phase 8 (scope-cut, no deploy recipe): `db:seed` dev token, root `.env.example` + drift guard, GitHub Actions CI on Postgres 16, README rewrite, `CORS_ALLOWED_ORIGINS` gates HTTP + WS. 234 tests (+11).
 - **0.7.4** — 2026-04-20 — Phase 7 Steps 12–16: real canvas pane (TipTap text / image / file blocks, pin, drag-reorder, drop-zone upload), unified `applyAgentEvent` module, shell polish (dark mode, router error/pending, `Cmd-S`), frontend vitest pass (+56), dev/env plumbing. 223 tests (+56).
 - **0.7.3** — 2026-04-20 — Phase 7 Steps 7–11: workspaces/brands list, workspace picker, settings page, TipTap+dnd-kit brand editor, project split-screen with realtime, `useAgentChat` SSE hook + Markdown chat pane.
 - **0.7.2** — 2026-04-20 — Phase 7 Steps 3–6: TanStack Router skeleton, Zustand `AuthStore` + local/Supabase providers + `AuthBoundary`, typed `hono/client` API + React Query, multiplexed `RealtimeClient` with `useProjectStream`.
@@ -18,6 +19,83 @@ Latest releases at the top. Each version has a one-line entry in the index below
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.8.0 — 2026-04-20
+
+Phase 8 is a reproducibility pass — no feature surface, no UI work. The original plan bundled dev-onboarding with a full self-host deploy story (server + web Dockerfiles, three-service compose, `bootstrap.sh`); we dropped the deploy half (no concrete self-hoster has surfaced, opinionated Dockerfiles are a maintenance magnet) and shipped the onboarding + CI + CORS half. Five steps land: `db:seed`, root `.env.example` + drift guard, GitHub Actions CI, README rewrite, and a CORS allowlist that gates HTTP **and** the `/rt` WS upgrade. Full step-by-step notes in `docs/completions/phase8.md`; full plan + scope rationale in `docs/executing/phase-8-plan.md`.
+
+Test count 223 → **234 (+11)**: +1 seed idempotency (live-DB, skipped without `DATABASE_URL` so locals pass at 233 + 1 skipped; CI exercises it against the Postgres service) + 1 `.env.example` drift guard + 8 cases in `packages/server/src/cors.test.ts` + 1 WS upgrade-guard case in `ws.test.ts`.
+
+### Step 0 — Seed script + dev-token flow
+
+Closes the "manual `INSERT INTO users`" gap from 0.7.4. `packages/db/src/seed.ts` is a transactional idempotent seed: one user + one workspace + one brand (three seed guideline sections) + one freeform project + canvas, under hard-coded RFC-4122 v4 UUIDs (`00000000-0000-4000-8000-000000000001…5`). Every insert uses `onConflictDoNothing({ target: <table>.id })`, so reruns are safe and the printed dev token never changes.
+
+**Printed token = the user UUID.** The `local` auth adapter already accepts any UUID that exists in `users` as a bearer — no new token format. `packages/db/package.json` gains a `db:seed` script (`tsx src/seed.ts`); the file self-executes when run directly (`/seed\.[cm]?[jt]s$/` check on `process.argv[1]`) but imports cleanly for tests.
+
+`seed.test.ts` runs `seed()` twice and asserts one row per aggregate (three for guideline sections). `describe.skipIf(!process.env.DATABASE_URL)` so contributors without Postgres still pass `pnpm test`; CI gets a Postgres service container and runs it.
+
+`packages/web/README.md` loses the "one-shot `INSERT`" paragraph in favour of the `db:seed` pointer.
+
+### Step 1 — Root `.env.example` + drift guard
+
+Rewritten to match the plan's "minimal viable defaults" policy: shipped stack is `local` auth + `local-disk` storage + `native-ws` realtime + `openrouter` LLM — the path with the fewest third-party accounts. A contributor with an OpenRouter key boots end-to-end. Optional keys are **commented-out** (not empty-string) — `""` trips `NonEmpty.optional()` (`string` but fails `min(1)`); the comment prefix avoids that footgun and lets the drift guard use a stable regex. Secret fields ship placeholder sentinels (`sk-or-v1-...`, `sk-ant-...`) to make "still need to fill this in" obvious. Section headers mirror `env.ts`'s comment groupings so readers cross-referencing find the same order.
+
+**`env.ts` split.** `.superRefine()` in zod v4.3.6 produces a `ZodEffects` that doesn't expose `.shape`. Split the schema into `EnvObject = z.object({…})` (inspectable) + `EnvSchema = EnvObject.superRefine(…)` (the validator). Same `Env` type, same `loadEnv()` behaviour, and `ENV_SCHEMA_KEYS` is now a first-class export. Prior consumers untouched.
+
+**`packages/server/src/env.example.test.ts` — drift guard.** Reads `.env.example` from the repo root via `import.meta.url` + `fileURLToPath` (server package is ESM — no `__dirname`), greps each line for `^\s*#?\s*([A-Z][A-Z0-9_]*)=`, asserts every `ENV_SCHEMA_KEYS` entry appears. Manually verified: deleting `DATABASE_URL=…` from the example produces `missing from .env.example: DATABASE_URL` and a red test. `packages/server/.gitignore` not created — the root `.gitignore` already ignores `.env` recursively.
+
+### Step 3 — GitHub Actions CI
+
+`.github/workflows/ci.yml` — one `verify` job, triggered on `pull_request` + `push main`. Node 20 matrix only (no 18 fallback; `.nvmrc` pins 20).
+
+- **Order matters.** `actions/setup-node@v4` with `cache: 'pnpm'` needs the pnpm binary on PATH and `pnpm-lock.yaml` present to hash. Sequence: `checkout → pnpm/action-setup@v3 → setup-node@v4 (node-version-file: .nvmrc, cache: pnpm) → pnpm install --frozen-lockfile`.
+- **pnpm version from `packageManager`.** `pnpm/action-setup@v3` reads `package.json`'s `"packageManager": "pnpm@10.28.2"` — no version duplicated in the workflow.
+- **Postgres 16 service container** (`user/password/db = brandfactory`, `pg_isready` healthcheck, port 5432 published). `DATABASE_URL=postgres://brandfactory:brandfactory@localhost:5432/brandfactory` exported job-level.
+- `pnpm -F @brandfactory/db db:migrate` runs before tests so the seed test sees a real schema.
+- Four check steps (typecheck, lint, format-check, test) as separate `- run:` entries so a PR author sees every failure in one run, not just the first.
+- `concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: true }` so force-pushes to a PR don't pile up. Default `permissions: contents: read`.
+
+No `images.yml` — paired with the dropped Dockerfiles; returns when they do. Root README gets a CI badge.
+
+### Step 4 — Root `README.md` rewrite
+
+The root README becomes the complete first-run document; `packages/web/README.md` demotes to a frontend-dev reference. Kept: branding block, `The problem` / `The idea` / `Who it's for` / `Why open source` / `How it'll work` / `Tech stack` / `License`. Replaced:
+
+- **Status** — now names the Phase-8 adds (dev seed, root env template, CI, CORS gate); "Up next" points at Phase 9 (Playwright, adapter docs, standardized templates).
+- **Quickstart** — six-command flow: `pnpm install`, compose up Postgres, `cp .env.example`, `cp packages/web/.env.example`, `db:migrate`, `db:seed`, `pnpm dev`. Contributors who prefer their own Postgres skip the compose line.
+- **Configuration** table — every server env var with required-when, default, one-line note. `SUPABASE_*` and per-provider LLM keys grouped for readability; frontend env delegates to `packages/web/README.md`.
+- **Swapping the LLM provider** — three-step walkthrough. Explicitly notes the compile-time `LLM_PROVIDER_IDS` union so readers understand why widening it propagates everywhere.
+- **Deploying it yourself** — one honest paragraph: server is a plain Node app, web is a static Vite build, `CORS_ALLOWED_ORIGINS` handles split-origin; links to GitHub issues inviting self-hosters to share their setups. No opinionated Dockerfile / compose / bootstrap.
+- **Contributing** — rewired around CI with a link to `.github/workflows/ci.yml`.
+
+Killed the self-aware "Phase-8 README overhaul will fold…" sentence.
+
+### Step 5 — CORS pass
+
+Single env switch gates both transports: `CORS_ALLOWED_ORIGINS` (optional, comma-separated). Unset → no CORS mount, no WS origin check (single-origin dev via Vite proxy is unaffected). Set → both enforce the same exact-match allowlist so HTTP and WS cannot drift.
+
+- **`packages/server/src/cors.ts`** — two pure helpers. `parseCorsAllowedOrigins(raw)` returns `null` (unset) or `string[]`; empty/whitespace-only inputs fold to `null` so "no allowlist" stays a distinct value (not `[]`, which would mean "allow nothing"). `isOriginAllowed(origin, list)` — `null` list permits, set list + missing origin denies, set list + origin requires exact match. The same function drives the HTTP `cors()` `origin:` callback and the WS upgrade guard.
+- **`app.ts`** — `hono/cors` mounted conditionally, before `onError`, with `origin: req → allowlist.includes(origin) ? origin : null`, `credentials: true`, `allowMethods: ['GET','POST','PATCH','DELETE','OPTIONS']`, `allowHeaders: ['content-type','authorization']`.
+- **`ws.ts`** — upgrade handler 403s before `handleUpgrade`. Explicit `socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')` before `socket.destroy()` so the browser reads a permanent denial instead of a transport failure (which would trigger client-side reconnect loops). Same pattern `ws` uses internally when `verifyClient` rejects. `MountRealtimeDeps` gains `allowedOrigins?: string[] | null`; `main.ts` threads `parseCorsAllowedOrigins(env.CORS_ALLOWED_ORIGINS)` through.
+- **Tests.** `cors.test.ts` covers the two helpers (5) + the HTTP middleware (3) via `app.request('/health', { headers: { origin } })`. `ws.test.ts` adds one integration-style case: `EventEmitter` stand-in for `HttpServer`, vi-mocked `realtime.bindToNodeWebSocketServer`, fake `Duplex` with spies — emits `upgrade` with a disallowed origin and asserts `write('HTTP/1.1 403 …')` + `destroy()` fired.
+- **`.env.example`** — new commented section documents the setting. The drift guard (Step 1) forces it to stay in sync.
+
+### Verification
+
+```
+pnpm typecheck                          ✔  9/9 workspaces clean
+pnpm lint                               ✔  clean
+pnpm format:check                       ✔  clean
+pnpm test                               ✔  233 passed + 1 skipped (234 in CI)
+```
+
+### Items explicitly dropped / deferred
+
+**Dropped this phase** (deploy half of the original plan): server + web Dockerfiles · full three-service `docker/compose.yaml` · `scripts/bootstrap.sh` · `images.yml` CI workflow + GHCR publishing · multi-arch image builds · signed image releases · production TLS / reverse-proxy config · `.env.web.example` at the repo root.
+
+**Deferred to later phases:** optimistic canvas mutations, server-side `position` rebalance, `Cmd-K` palette (Phase-7 tail). Playwright e2e, per-aggregate integration tests, `docs/adapters.md` (Phase 9). DB backup/restore, secrets management, observability (deployer territory). CodeQL / Dependabot / Renovate (separate dependency-hygiene pass).
 
 ---
 

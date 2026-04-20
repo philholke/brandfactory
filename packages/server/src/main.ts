@@ -5,6 +5,7 @@ import type { Server as HttpServer } from 'node:http'
 import { buildAdapters } from './adapters'
 import { createAgentConcurrencyGuard } from './agent/concurrency'
 import { createApp } from './app'
+import { parseCorsAllowedOrigins } from './cors'
 import { buildDbDeps } from './db'
 import { loadEnv } from './env'
 import { createLogger } from './logger'
@@ -43,6 +44,7 @@ async function main(): Promise<void> {
   // Narrowing on the discriminator forces every future impl to declare its
   // own upgrade strategy — the `never` assertion in the default branch
   // turns a missing case into a TS error.
+  const allowedOrigins = parseCorsAllowedOrigins(env.CORS_ALLOWED_ORIGINS)
   let ws: MountRealtimeHandle
   switch (adapters.realtime.provider) {
     case 'native-ws':
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
         auth: adapters.auth,
         db,
         log,
+        allowedOrigins,
       })
       break
     default: {

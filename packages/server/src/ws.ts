@@ -6,6 +6,7 @@ import type { Duplex } from 'node:stream'
 import { URL as NodeURL } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { requireBrandAccess, requireProjectAccess, requireWorkspaceAccess } from './authz'
+import { isOriginAllowed } from './cors'
 import type { Db } from './db'
 import type { Logger } from './logger'
 
@@ -15,6 +16,10 @@ export interface MountRealtimeDeps {
   auth: AuthProvider
   db: Db
   log: Logger
+  // Mirrors the HTTP `cors()` gate. `null` (or unset in env) disables the
+  // origin check — matches single-origin dev. When set, the upgrade is
+  // destroyed before the adapter sees it if `Origin` isn't on the list.
+  allowedOrigins?: string[] | null
 }
 
 export interface MountRealtimeHandle {
@@ -75,6 +80,7 @@ export async function authorizeChannel(
 export function mountRealtime(deps: MountRealtimeDeps): MountRealtimeHandle {
   const wss = new WebSocketServer({ noServer: true })
 
+  const allowedOrigins = deps.allowedOrigins ?? null
   deps.httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     let pathname: string
     try {
@@ -84,6 +90,14 @@ export function mountRealtime(deps: MountRealtimeDeps): MountRealtimeHandle {
       return
     }
     if (pathname !== '/rt') {
+      socket.destroy()
+      return
+    }
+    // Origin gate pairs with the HTTP `cors()` allowlist: a browser page
+    // from a disallowed origin can't dodge CORS by reaching for the WS
+    // transport instead.
+    if (!isOriginAllowed(req.headers.origin, allowedOrigins)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       socket.destroy()
       return
     }

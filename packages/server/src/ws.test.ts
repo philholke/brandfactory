@@ -1,7 +1,10 @@
 import type { UserId } from '@brandfactory/shared'
-import { describe, expect, it } from 'vitest'
-import { authorizeChannel } from './ws'
-import { createFakeDb } from './test-helpers'
+import type { IncomingMessage, Server as HttpServer } from 'node:http'
+import { EventEmitter } from 'node:events'
+import type { Duplex } from 'node:stream'
+import { describe, expect, it, vi } from 'vitest'
+import { authorizeChannel, mountRealtime } from './ws'
+import { createFakeAuth, createFakeDb, silentLogger } from './test-helpers'
 
 async function seed() {
   const { db } = createFakeDb()
@@ -51,5 +54,40 @@ describe('authorizeChannel', () => {
     const { db, owner } = await seed()
     expect(await authorizeChannel(owner, 'no-colon', db)).toBe(false)
     expect(await authorizeChannel(owner, 'project:', db)).toBe(false)
+  })
+})
+
+describe('mountRealtime: upgrade origin guard', () => {
+  it('destroys the socket with 403 when Origin is not in the allowlist', async () => {
+    const httpServer = new EventEmitter() as unknown as HttpServer
+    const { db } = createFakeDb()
+    const realtime = {
+      bindToNodeWebSocketServer: vi.fn(),
+      publish: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+    }
+    const handle = mountRealtime({
+      httpServer,
+      // The fake satisfies only the surface `mountRealtime` uses.
+      realtime: realtime as unknown as Parameters<typeof mountRealtime>[0]['realtime'],
+      auth: createFakeAuth({}),
+      db,
+      log: silentLogger(),
+      allowedOrigins: ['https://app.example.com'],
+    })
+
+    const destroy = vi.fn()
+    const write = vi.fn()
+    const socket = { destroy, write } as unknown as Duplex
+    const req = {
+      url: '/rt',
+      headers: { origin: 'https://evil.example.com' },
+    } as unknown as IncomingMessage
+
+    httpServer.emit('upgrade', req, socket, Buffer.alloc(0))
+
+    expect(write).toHaveBeenCalledWith(expect.stringMatching(/^HTTP\/1\.1 403 /))
+    expect(destroy).toHaveBeenCalled()
+    await handle.close()
   })
 })
