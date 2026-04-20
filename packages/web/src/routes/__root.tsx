@@ -1,5 +1,6 @@
 import { createRootRoute, Link, Outlet, useNavigate } from '@tanstack/react-router'
 import { Toaster } from '@/components/ui/sonner'
+import { ThemeToggle } from '@/components/ThemeToggle'
 import { AuthBoundary } from '@/auth/AuthBoundary'
 import { useAuthStore } from '@/auth/store'
 import { useWorkspaces } from '@/api/queries/workspaces'
@@ -52,6 +53,7 @@ function RootLayout() {
         </Link>
         <div className="flex-1" />
         <WorkspacePicker />
+        <ThemeToggle />
       </header>
       <main className="flex flex-1 overflow-hidden">
         <AuthBoundary>

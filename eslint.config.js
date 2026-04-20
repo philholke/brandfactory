@@ -19,6 +19,7 @@ export default tseslint.config(
       '**/*.config.cjs',
       '**/*.config.mjs',
       '**/*.config.ts',
+      '**/vitest.workspace.ts',
     ],
   },
   js.configs.recommended,

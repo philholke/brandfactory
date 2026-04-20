@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createRoute, Link, redirect } from '@tanstack/react-router'
 import { useEditor, EditorContent } from '@tiptap/react'
 import {
@@ -171,8 +171,7 @@ function BrandEditorForm({ brand }: { brand: BrandWithSections }) {
     })
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
+  function save() {
     const payload: UpdateBrandGuidelinesInput = {
       sections: sections.map((s, i) => ({
         ...(s.id !== undefined ? { id: s.id as SectionId } : {}),
@@ -190,6 +189,26 @@ function BrandEditorForm({ brand }: { brand: BrandWithSections }) {
         toast.error(err instanceof AppError ? err.message : 'Failed to save guidelines'),
     })
   }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    save()
+  }
+
+  const saveRef = useRef(save)
+  useEffect(() => {
+    saveRef.current = save
+  })
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        saveRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const unusedSuggestions = SUGGESTED_SECTIONS.filter(
     (sg) => !sections.some((s) => s.label === sg.label),

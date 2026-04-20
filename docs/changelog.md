@@ -4,6 +4,7 @@ Latest releases at the top. Each version has a one-line entry in the index below
 
 ## Index
 
+- **0.7.4** — 2026-04-20 — Phase 7 Steps 12–16: real canvas pane (TipTap text / image / file blocks, pin, drag-reorder, drop-zone upload), unified `applyAgentEvent` module, shell polish (dark mode, router error/pending, `Cmd-S`), frontend vitest pass (+56), dev/env plumbing. 223 tests (+56).
 - **0.7.3** — 2026-04-20 — Phase 7 Steps 7–11: workspaces/brands list, workspace picker, settings page, TipTap+dnd-kit brand editor, project split-screen with realtime, `useAgentChat` SSE hook + Markdown chat pane.
 - **0.7.2** — 2026-04-20 — Phase 7 Steps 3–6: TanStack Router skeleton, Zustand `AuthStore` + local/Supabase providers + `AuthBoundary`, typed `hono/client` API + React Query, multiplexed `RealtimeClient` with `useProjectStream`.
 - **0.7.1** — 2026-04-20 — Phase 7 Steps 0–2: frontend-facing server surface (canvas-op, messages, blob-url routes; widened `GET /projects/:id` → `ProjectDetail`), Vite+React 19 scaffold, Tailwind v4 + shadcn/ui primitives. 167 tests (+27).
@@ -17,6 +18,109 @@ Latest releases at the top. Each version has a one-line entry in the index below
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.7.4 — 2026-04-20
+
+Phase 7 Steps 12–16 close out the frontend phase. Step 12 replaces the placeholder canvas pane with the real thing — text/image/file block renderers, drag-reorder, pin/unpin/delete, and a drop-zone that uploads via signed URL. Step 13 lifts `applyAgentEvent` into its own module (no behaviour change) so SSE and realtime paths share one cache-write surface. Step 14 lands shell polish (dark-mode toggle, router error/pending boundaries, `Cmd/Ctrl-S` in the brand editor). Step 15 is the frontend vitest pass — test count 167 → **223 (+56)** across 9 workspaces, and surfaced one `useAgentChat` bug that shipped silent in 0.7.3. Step 16 wires dev-env plumbing (`scripts/dev.sh`, `packages/web/.env.example`, `packages/web/README.md`). Phase-7 net growth: +27 backend (Step 0) + 56 frontend (Step 15) = 200 tests. Full step-by-step notes in `docs/completions/phase7-step-{12,13,14,15,16}.md`.
+
+### Step 12 — Canvas pane (blocks + TipTap + pinning + drop zone)
+
+Right-pane placeholder → real canvas. Five new files under `src/components/canvas/`:
+
+- **`blocks/BlockChrome.tsx`** — hover-reveal left rail: drag handle (`GripVertical`), pin/unpin star, delete trash. Drag listeners attach to the handle only — `PointerSensor`'s 8 px activation constraint isn't enough to disambiguate clicks inside the TipTap editor. Same pattern as the brand editor.
+- **`blocks/TextBlockView.tsx`** — TipTap editor seeded with `block.body`, using `defaultExtensions` from `@/editor/proseMirrorSchema` (bit-identical to the brand editor — prereq for the future "promote canvas block to brand section" flow). Edits debounced 500 ms; unmount flushes pending edits. Inbound realtime echoes are **not** synced back into the editor — canvas is last-write-wins per block (Phase-7 plan non-goal).
+- **`blocks/ImageBlockView.tsx`** — `<img>` from `useSignedReadUrl(blobKey)`, click opens a minimal lightbox. Inline alt-text input PATCHes on blur (sends `alt: null` on empty string, matching `UpdateCanvasBlockInputSchema.nullable()`).
+- **`blocks/FileBlockView.tsx`** — icon + filename + mime + "Download" link to the signed read URL. No preview.
+- **`CanvasPane.tsx`** — wraps visible blocks in `DndContext` + `SortableContext` (vertical), renders one `SortableBlock` per block dispatching by `block.kind`, hosts the drop-zone and "+ Text block" button. Replaces the inline placeholder from the route.
+
+New mutation/query hooks under `src/api/queries/`:
+
+- **`canvas.ts`** — five mutations (`useCreateCanvasBlock`, `useUpdateCanvasBlock`, `usePinCanvasBlock`, `useUnpinCanvasBlock`, `useDeleteCanvasBlock`). **Non-optimistic in v1** — the server publishes a realtime event after every DB write and `applyAgentEvent` folds it into the cache, so mutation return values are advisory.
+- **`blobs.ts`** — `useSignedReadUrl(key)` (staleTime/refetchInterval 4 min against the server's 5 min TTL so an `<img>` at the edge of the window doesn't race expiry) + `uploadBlob({ file })` two-step helper. Both use raw `fetch` not `hono/client` — the server's `/blob-urls/:key{.+}/read-url` path contains slashes that the hono client doesn't round-trip cleanly (same reasoning as `useAgentChat` for streaming).
+
+**Drag-reorder PATCHes one block, not the whole list.** `positionAt` sandwiches the moved block between neighbours as `Math.floor((before + after) / 2)`, with ±1000 bookends. Stays inside `int4` for a long time before consecutive positions converge and need a server-side rebalance pass. Matches the brand editor's sparse-integer trick.
+
+**Drop-zone.** `onDragEnter` toggles a dashed outline on `Files` drag-over; `onDragLeave` only clears when leaving the pane element itself (`currentTarget === target`) so child elements don't flicker. A `uploading` count paints skeleton blocks per in-flight upload; skeletons disappear when the create-block mutation resolves (which is also when the realtime echo paints the real block). No byte-level progress — uploads are a single PUT to storage.
+
+**MIME allowlist is checked client-side AND server-side.** `ALLOWED_UPLOAD_MIMES` in `@brandfactory/shared` rejects unsupported types with a toast before minting an upload URL; the server rejects with `400 INVALID_CONTENT_TYPE` if the client lies. Client save is one round-trip; server is the trust boundary.
+
+### Step 13 — Unified `applyAgentEvent` dispatcher
+
+`src/realtime/applyAgentEvent.ts` — the dispatcher lifted out of `useProjectStream.ts` into its own module. No behaviour change. The three mutation paths (local mutations via realtime echo, `useAgentChat` in-turn SSE, `useRealtime` out-of-turn fan-out) now share one cache-write surface — future rule changes edit one file. `qc` typed as `QueryClient` directly (not `ReturnType<typeof useQueryClient>`) so a pure function doesn't pull a React hook into its type surface.
+
+**Validation stays at the boundaries.** `useAgentChat` parses each SSE `data:` payload with `AgentEventSchema.parse` before calling `applyAgentEvent`; `RealtimeClient` validates inbound WS frames against `RealtimeServerMessageSchema` (which wraps `AgentEventSchema`). Pushing the parse into the dispatcher would double-parse the realtime path.
+
+**Dedup policy unchanged.** `add-block` dedupes by `block.id`; `message` by `event.id`; `update-block`/`remove-block`/`pin-op` are idempotent writes. The `updatedAt`-aware monotonic dedup stays on the post-Phase-7 hardening list — it would require wiring `updatedAt` through the `canvas-op` event shape, a Phase-5/6 wire change.
+
+### Step 14 — Shell polish
+
+- **`src/lib/theme.ts`** — tiny module around `localStorage['bf_theme']` (`'light' | 'dark' | 'system'`). `applyTheme(mode)` toggles `.dark` on `<html>`; `resolveTheme` reads `matchMedia('(prefers-color-scheme: dark)')` when mode is `system`. No React — callable at module-entry in `main.tsx` to avoid a flash of the wrong theme before first render.
+- **`src/components/ThemeToggle.tsx`** — icon button in the top nav cycling `light → dark → system`. `useEffect` listens to `prefers-color-scheme` changes only while mode is `system`, so OS-level flips propagate live.
+- **`src/components/RouteError.tsx`** — exports `RouteError` (router's `defaultErrorComponent`) + `RoutePending` (`defaultPendingComponent`). Error view narrows on `AppError` so the server's `{ code, message }` renders as-is; "Retry" calls both `reset` and `router.invalidate()` so React-Query caches refetch, not just route state. Wired in `router.tsx` with `defaultPendingMs: 400` (Nielsen's "does this feel instant" threshold).
+- **`Cmd/Ctrl-S` in the brand editor** — document-level `keydown` listener (a form-level handler trips `jsx-a11y/no-noninteractive-element-interactions`). A `saveRef.current = save` assigned in a no-deps `useEffect` keeps the latest save closure bound without breaking `react-hooks/refs`.
+
+**`Cmd-K` command palette dropped** per the plan's stretch-goal guidance. The actions that would live in a palette today (new workspace, new brand, open settings, toggle theme) are all one click away; adding `cmdk` + another focus trap isn't worth it until the action count justifies it.
+
+### Step 15 — Frontend vitest pass (+56)
+
+Isolated-unit coverage for the hairy parts of `@brandfactory/web`. Test count 167 → **223 (+56)** across 9 workspaces.
+
+- **`agent/sseParser.test.ts`** (8) — single-frame, default `event: message`, multi-frame per chunk, cross-chunk buffering, keep-alive comments, optional space after colon, multi-line `data:`, comment-only frames.
+- **`realtime/applyAgentEvent.test.ts`** (11) — every `AgentEvent` kind over before/after cache snapshots: `canvas-op` add/update/remove (incl. dedupe by `block.id`), `pin-op` pin/unpin (idempotent), `message` append + dedupe by id, `tool-call` no-op (identity-asserted), missing-cache guard.
+- **`realtime/client.test.ts`** (9) — `FakeWebSocket` + `vi.resetModules()` per test so the singleton resets cleanly. Covers initial connect, channel dispatch, malformed-frame drop, cross-channel isolation, ref-counting (two handlers → one socket), teardown-on-last-unmount, exponential backoff (incl. backoff reset on `onOpen`), `onResynced` firing on reconnects but not first connect.
+- **`api/client.test.ts`** (5) — happy 2xx parse, `AppError` on non-2xx, statusText fallback, `logout()` side effect on 401, `AppError` shape.
+- **`agent/useAgentChat.test.tsx`** (5) — mocks `fetch` against a `ReadableStream`-backed SSE body. Golden path (optimistic user push + assistant message + `canvas-op` folded via `applyAgentEvent`), 409 `AGENT_BUSY` toast, 401 → `logout()`, in-stream `error` frame transitioning to the error state (**surfaced the bug below**), empty-input short-circuit.
+- **`editor/proseMirrorSchema.test.ts`** (4) — `defaultExtensions` mounted in a real `@tiptap/core` `Editor` (jsdom) produce docs that pass `ProseMirrorDocSchema`, round-trip `setContent → getJSON`, support H1–H3, render `bulletList`. Pins the invariant that brand editor + canvas text-block share the exact schema.
+- **`lib/theme.test.ts`** (8) — `getStoredTheme` defaults / stored-value / unknown fallback, `setStoredTheme` writes to `localStorage`, `resolveTheme` explicit vs `system` (with `matchMedia` stubbed via `vi.stubGlobal`), `applyTheme` toggles `.dark`.
+- **`canvas/blocks/BlockChrome.test.tsx`** (4) — accessible labels, `Pin ↔ Unpin` toggle, `onTogglePin`/`onDelete` fire on click, `pending` disables pin+delete but leaves drag interactive.
+- **`canvas/blocks/TextBlockView.test.tsx`** (2) — editor mounts with body text visible, `[contenteditable="true"]` surface present. Debounce/unmount-flush assertions were flaky under jsdom (TipTap async init + React 19) — kept focused on mount.
+- **`src/test-setup.ts`** — calls RTL's `cleanup()` after each test. Required the moment a second test rendered a similarly-named button.
+
+**Bug found + fixed: `useAgentChat` error state was silently clobbered.** `send`'s trailing `if (status !== 'error') setStatus('idle')` read `status` from the `useCallback` closure (captured at render as `'idle'`), so after an in-stream `event: error` frame set state to `'error'`, the trailing line immediately overrode it back to `'idle'` in the same tick. UI silently dropped the error. Replaced the stale closure read with a local `hadError` flag written in the error branch. One-line fix.
+
+**Workspace orchestration quirk: `vitest.workspace.ts` > `test.projects`.** Running root `pnpm test` with `test.projects: ['packages/web']` in `vitest.config.ts` silently dropped `environment: 'jsdom'` and the `@/*` alias from the web config — TipTap + `localStorage` tests failed with "no window" / "localStorage is not defined". Switching to a top-level `vitest.workspace.ts` listing each package's config did honour per-project `environment` / `resolve.alias`. Root `vitest.config.ts` is now effectively empty + documented. `eslint.config.js` adds `**/vitest.workspace.ts` to `ignores` (TS project-service parser otherwise trips on the file).
+
+**No `jest-dom` matchers, no `user-event`.** Golden-path component tests use RTL's built-ins (`getByRole`, `.disabled`, `.classList`) — fine at this coverage level. Deferred: `DropZone` integration test (80% mocks for 20% assertion; deferred to Playwright in Phase 9), `positionAt` unit test (module-local to `CanvasPane.tsx`; extracting is scope creep), `useProjectStream` hook test (delegates entirely to `subscribe` + `applyAgentEvent`, both tested in isolation), `uploadBlob` helper test (straight-line `fetch` glue).
+
+### Step 16 — Dev & env plumbing
+
+- **`packages/web/.env.example`** — the five `VITE_*` vars the frontend reads (`VITE_API_BASE_URL`, `VITE_RT_URL`, `VITE_AUTH_PROVIDER`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`). Header comment calls out that `VITE_*` vars inline into the client bundle — no secrets. Supabase anon key is public-safe by design; service-role key stays server-side.
+- **`packages/web/README.md`** — frontend-specific dev docs: quickstart, env var table, dev-proxy explainer, auth-provider walkthrough (local + supabase), scripts reference, three troubleshooting entries that came out of Step 15.
+- **`scripts/dev.sh`** — replaced the Phase-0 placeholder with a real parallel launcher. Plain `pnpm -F @brandfactory/server dev` + `pnpm -F @brandfactory/web dev` backgrounded; `trap cleanup INT TERM EXIT` kills both children on any exit path; `wait -n` exits as soon as either dies so a crashed server doesn't leave Vite running with misleading 500s. No `concurrently` / `turbo` dep — bash + pnpm in ~20 lines.
+- **Root `README.md`** — Status block updated ("server + web shipped"); new "Running locally" section (4-command quickstart pointing at `packages/web/README.md`). Minimal on purpose — Phase 8 owns the full README rewrite.
+
+**Dev token = any user UUID in the DB.** The plan's Step 4 mentioned a dev seed script printing one at boot; no such script exists yet, and Step 16 isn't the place to add it. `packages/web/README.md` documents a one-shot `INSERT INTO users (email) VALUES (…) RETURNING id` + paste into `/login`. Seed script is post-Phase-7.
+
+### Verification
+
+```
+pnpm typecheck                          ✔  9/9 workspaces clean
+pnpm lint                               ✔  clean
+pnpm format:check                       ✔  clean
+pnpm test                               ✔  223 tests (+56; 167 → 223)
+pnpm --filter @brandfactory/web build   ✔  dist/ clean
+bash -n scripts/dev.sh                  ✔  shell syntax clean
+```
+
+The pre-existing 1.1 MB JS chunk warning is unchanged — TipTap + Radix dominate. Bundle budget is on the post-Phase-7 hardening list.
+
+### Items deferred from Steps 12–16
+
+- **Optimistic canvas mutations** — every user canvas-op round-trips today; pin toggle latency is the most visible offender. Post-Phase-7 hardening.
+- **Server-side position rebalance** — `positionAt` will eventually produce equal positions after enough back-and-forth dragging in the same gap. Periodic rebalance to sparse integers on the server fixes it.
+- **Width/height on image upload** — `CreateImageCanvasBlockInputSchema` accepts them; currently left undefined (natural `<img>` sizing).
+- **Lightbox polish** — single fullscreen image + click-to-close today; no prev/next, no keyboard nav, no zoom.
+- **Tool-call accordion UI in chat** — `tool-call` events still pass through `applyAgentEvent` as a no-op; flagged since Step 11.
+- **Inbound TipTap sync (collab editing)** — non-goal per the plan's no-CRDT stance.
+- **Monotonic op-id dedup** — requires wiring `updatedAt` through the `canvas-op` event shape.
+- **`DropZone` / `CanvasPane` integration test**, `positionAt` unit test, `useProjectStream` hook test, `uploadBlob` helper test — see Step 15 notes.
+- **`Cmd-K` command palette** — dropped per stretch-goal guidance.
+- **Theme-switch view-transition**, **multi-tab theme sync** — minor polish, deferred.
+- **`scripts/bootstrap.sh` / dev seed script** — would print a usable dev token on first boot; docs note the manual `INSERT` fallback.
+- **CORS headers for cross-origin prod deploys** — frontend handles absolute `VITE_API_BASE_URL` / `VITE_RT_URL`, but the Hono server doesn't mount CORS yet. Single-origin dev is fine; split deploy needs a CORS pass.
+- **Playwright smoke alignment with the plan's Step 17 checklist** — Phase 9 automates this.
 
 ---
 

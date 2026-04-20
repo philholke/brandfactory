@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import { AgentEventSchema, type AgentMessage, type ProjectDetail } from '@brandfactory/shared'
 import { getAuthToken, useAuthStore } from '@/auth/store'
 import { projectKeys } from '@/api/queries/projects'
-import { applyAgentEvent } from '@/realtime/useProjectStream'
+import { applyAgentEvent } from '@/realtime/applyAgentEvent'
 import { SseFrameParser } from './sseParser'
 
 export type ChatStatus = 'idle' | 'streaming' | 'error'
@@ -86,6 +86,7 @@ export function useAgentChat(projectId: string): UseAgentChatResult {
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let done = false
+        let hadError = false
 
         while (!done) {
           const chunk = await reader.read()
@@ -107,6 +108,7 @@ export function useAgentChat(projectId: string): UseAgentChatResult {
               setError(message)
               setStatus('error')
               toast.error(message)
+              hadError = true
               done = true
               break
             }
@@ -120,7 +122,7 @@ export function useAgentChat(projectId: string): UseAgentChatResult {
           }
         }
 
-        if (status !== 'error') setStatus('idle')
+        if (!hadError) setStatus('idle')
       } catch (err) {
         if (controller.signal.aborted) {
           setStatus('idle')

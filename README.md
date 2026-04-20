@@ -67,14 +67,31 @@ anything else — because the brand context always travels with it.
 > 🚧 **Pre-alpha — scaffolding in progress.**
 >
 > The vision, architecture, and foundational packages are landing phase by
-> phase. There's no runnable app yet. Follow the
-> [changelog](docs/changelog.md) to track what's shipped.
+> phase. Follow the [changelog](docs/changelog.md) to track what's shipped.
 
 **Shipped so far:** repo foundation · shared domain types · Postgres schema
-& query layer · adapter ports (auth, storage, realtime) · local Docker dev
-setup.
+& query layer · adapter ports (auth, storage, realtime, LLM) · Hono server
+with streaming agent + realtime WS · Vite + React 19 frontend with
+split-screen project workspace, brand editor, settings, and realtime
+canvas.
 
-**Up next:** Hono server, agent orchestration, the split-screen web app.
+**Up next:** Docker-compose dev image (Phase 8), Playwright e2e (Phase 9),
+standardized project templates.
+
+## Running locally
+
+```bash
+docker compose -f docker/compose.yaml up -d       # Postgres
+pnpm -F @brandfactory/db db:migrate               # schema
+cp .env.example .env                              # server env
+cp packages/web/.env.example packages/web/.env    # frontend env
+pnpm dev                                          # server :3001 + web :5173
+```
+
+Full frontend setup (auth provider, Supabase keys, local-dev token flow,
+LLM provider choices) lives in
+[`packages/web/README.md`](packages/web/README.md). The Phase-8 README
+overhaul will fold those notes into this file.
 
 ## How it'll work (sneak peek)
 
