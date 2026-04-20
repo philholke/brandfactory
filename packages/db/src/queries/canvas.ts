@@ -13,6 +13,11 @@ import { db } from '../client'
 import { rowToCanvas, rowToCanvasBlock } from '../mappers'
 import { canvasBlocks, canvases } from '../schema'
 
+export async function getBlockById(id: CanvasBlockId): Promise<CanvasBlock | null> {
+  const [row] = await db.select().from(canvasBlocks).where(eq(canvasBlocks.id, id))
+  return row ? rowToCanvasBlock(row) : null
+}
+
 export async function getCanvasByProject(projectId: ProjectId): Promise<Canvas | null> {
   const [row] = await db.select().from(canvases).where(eq(canvases.projectId, projectId))
   return row ? rowToCanvas(row) : null

@@ -21,6 +21,11 @@ export * from './brand/update-guidelines'
 export * from './project/project'
 export * from './project/canvas'
 export * from './project/create'
+export * from './project/canvas-op'
+export * from './project/detail'
+
+// Blob
+export * from './blob/upload'
 
 // Agent event stream
 export * from './agent/events'

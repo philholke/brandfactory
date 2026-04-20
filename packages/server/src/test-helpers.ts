@@ -222,6 +222,9 @@ export function createFakeDb(state: FakeDbState = createFakeDbState()): {
       return row
     },
 
+    async getBlockById(id) {
+      return state.canvasBlocks.get(id) ?? null
+    },
     async listActiveBlocks(canvasId) {
       return [...state.canvasBlocks.values()]
         .filter((b) => b.canvasId === canvasId && b.deletedAt === null)
@@ -267,6 +270,20 @@ export function createFakeDb(state: FakeDbState = createFakeDbState()): {
       }
       state.canvasBlocks.set(id, block)
       return block
+    },
+    async updateBlock(id, patch) {
+      const existing = state.canvasBlocks.get(id)
+      if (!existing) throw new Error(`Block ${id} not found`)
+      const updated: CanvasBlock = { ...existing, ...patch, updatedAt: NOW } as CanvasBlock
+      state.canvasBlocks.set(id, updated)
+      return updated
+    },
+    async softDeleteBlock(id) {
+      const existing = state.canvasBlocks.get(id)
+      if (!existing) throw new Error(`Block ${id} not found`)
+      const updated: CanvasBlock = { ...existing, deletedAt: NOW, updatedAt: NOW }
+      state.canvasBlocks.set(id, updated)
+      return updated
     },
     async setPinned(id, value) {
       const existing = state.canvasBlocks.get(id)

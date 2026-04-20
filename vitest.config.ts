@@ -14,6 +14,7 @@ export default defineConfig({
       'packages/agent',
       'packages/db',
       'packages/server',
+      'packages/web',
     ],
   },
 })

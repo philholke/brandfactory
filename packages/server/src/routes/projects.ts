@@ -1,11 +1,16 @@
-import { BrandIdSchema, CreateProjectInputSchema, ProjectIdSchema } from '@brandfactory/shared'
+import {
+  BrandIdSchema,
+  CreateProjectInputSchema,
+  ProjectIdSchema,
+  type BrandWithSections,
+} from '@brandfactory/shared'
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { requireBrandAccess, requireProjectAccess } from '../authz'
 import type { AppEnv } from '../context'
 import type { Db } from '../db'
-import { UnauthorizedError } from '../errors'
+import { NotFoundError, UnauthorizedError } from '../errors'
 
 export interface ProjectsDeps {
   db: Db
@@ -60,8 +65,23 @@ export function createProjectsRouter(deps: ProjectsDeps) {
     const userId = c.var.userId
     if (!userId) throw new UnauthorizedError()
     const { id } = c.req.valid('param')
-    const { project } = await requireProjectAccess(userId, id, deps.db)
+    const { project, brand } = await requireProjectAccess(userId, id, deps.db)
     const canvas = await deps.db.getCanvasByProject(project.id)
-    return c.json({ ...project, canvas })
+    if (!canvas) throw new NotFoundError('canvas not found', 'CANVAS_NOT_FOUND')
+    const [blocks, shortlist, sections, recentMessages] = await Promise.all([
+      deps.db.listActiveBlocks(canvas.id),
+      deps.db.getShortlistView(project.id),
+      deps.db.listSectionsByBrand(brand.id),
+      deps.db.listAgentMessages(project.id),
+    ])
+    const brandWithSections: BrandWithSections = { ...brand, sections }
+    return c.json({
+      ...project,
+      canvas,
+      blocks,
+      shortlistBlockIds: shortlist.blockIds,
+      recentMessages,
+      brand: brandWithSections,
+    })
   })
 }

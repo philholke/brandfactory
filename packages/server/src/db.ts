@@ -35,8 +35,11 @@ export interface Db {
   upsertWorkspaceSettings: typeof db.upsertWorkspaceSettings
 
   // Canvas blocks + events
+  getBlockById: typeof db.getBlockById
   listActiveBlocks: typeof db.listActiveBlocks
   createBlock: typeof db.createBlock
+  updateBlock: typeof db.updateBlock
+  softDeleteBlock: typeof db.softDeleteBlock
   setPinned: typeof db.setPinned
   getShortlistView: typeof db.getShortlistView
   appendCanvasEvent: typeof db.appendCanvasEvent
@@ -63,8 +66,11 @@ export function buildDbDeps(): Db {
     getCanvasByProject: db.getCanvasByProject,
     getWorkspaceSettings: db.getWorkspaceSettings,
     upsertWorkspaceSettings: db.upsertWorkspaceSettings,
+    getBlockById: db.getBlockById,
     listActiveBlocks: db.listActiveBlocks,
     createBlock: db.createBlock,
+    updateBlock: db.updateBlock,
+    softDeleteBlock: db.softDeleteBlock,
     setPinned: db.setPinned,
     getShortlistView: db.getShortlistView,
     appendCanvasEvent: db.appendCanvasEvent,

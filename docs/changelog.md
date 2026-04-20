@@ -4,6 +4,9 @@ Latest releases at the top. Each version has a one-line entry in the index below
 
 ## Index
 
+- **0.7.3** — 2026-04-20 — Phase 7 Steps 7–11: workspaces/brands list, workspace picker, settings page, TipTap+dnd-kit brand editor, project split-screen with realtime, `useAgentChat` SSE hook + Markdown chat pane.
+- **0.7.2** — 2026-04-20 — Phase 7 Steps 3–6: TanStack Router skeleton, Zustand `AuthStore` + local/Supabase providers + `AuthBoundary`, typed `hono/client` API + React Query, multiplexed `RealtimeClient` with `useProjectStream`.
+- **0.7.1** — 2026-04-20 — Phase 7 Steps 0–2: frontend-facing server surface (canvas-op, messages, blob-url routes; widened `GET /projects/:id` → `ProjectDetail`), Vite+React 19 scaffold, Tailwind v4 + shadcn/ui primitives. 167 tests (+27).
 - **0.7.0** — 2026-04-19 — Phase 6: `POST /projects/:id/agent` ships end-to-end streaming — SSE over `streamResponse`, DB+realtime applier, per-project concurrency guard, `agent_messages` table. 140 tests (+20).
 - **0.6.1** — 2026-04-19 — Pre-Phase-6 hardening: realtime WS heartbeat, `verifySignature` clock-skew tolerance, `ProseMirrorDocSchema` parse on DB reads, `@brandfactory/db` vitest suite, `userId` in server error logs. 120 tests (+14).
 - **0.6.0** — 2026-04-19 — Phase 5: `@brandfactory/agent` ships `streamResponse` over an injected `CanvasOpApplier`, plus a four-item hardening pass (realtime subscribe race, `BLOB_MAX_BYTES` 413, two LOW cleanups). 106 tests.
@@ -14,6 +17,173 @@ Latest releases at the top. Each version has a one-line entry in the index below
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.7.3 — 2026-04-20
+
+Phase 7 Steps 7–11 — the first user-facing screens land on top of the app shell from 0.7.2. A user can now log in, create a workspace, create a brand, edit brand guidelines as rich text, create a project, open its split-screen, and run an agent turn whose assistant text and canvas-ops stream into the cache live. No new backend tests; test count stays at 167 across 9 workspaces (UI components have no isolated logic units yet — vitest coverage for `useAgentChat` and `sseParser` is scoped to Step 15). Full step-by-step notes in `docs/completions/phase7-step-{7,8,9,10,11}.md`.
+
+### Step 7 — Workspaces + brands list + workspace picker
+
+`/workspaces` renders `useWorkspaces()` as a grid with a "New workspace" Dialog; success invalidates `workspaceKeys.all()`, writes the new id to `localStorage` (`bf_last_workspace` via `src/lib/last-workspace.ts`), and navigates. `/workspaces/$wsId` mirrors the pattern for brands (`useWorkspaceBrands`). A `WorkspacePicker` `Select` in `__root.tsx`'s header is gated on `useAuthStore.token` (`useWorkspaces({ enabled: !!token })`) so it doesn't fire a 401 + inadvertent `logout()` on the login page. `autoFocus` dropped from dialog inputs to satisfy `jsx-a11y/no-autofocus`; Radix's focus trap covers it.
+
+### Step 8 — Settings page
+
+`/workspaces/$wsId/settings` renders `ResolvedWorkspaceSettings` with a `SourceBadge` ("workspace setting" / "env default") driven by `source`. Provider `Select` reads `LLM_PROVIDER_IDS` from `@brandfactory/shared` (widening the const auto-propagates). Form uses a **draft-overlay** pattern — `useState<FormDraft | null>(null)` with displayed values falling back to server data — so no `useEffect` writes into local state. `useUpdateWorkspaceSettings` calls the `PATCH` and `setQueryData`s the response back into the cache (no refetch). Save is disabled unless dirty + both fields present. API keys stay server-env only for v1; a muted line explains that DB-persisted keys are a later pass.
+
+### Step 9 — Brand editor
+
+`/brands/$brandId` replaces its placeholder with a full TipTap v3 + dnd-kit sortable section editor. New deps: `@tiptap/core`, `@tiptap/react`, `@tiptap/starter-kit`, `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`. `src/editor/proseMirrorSchema.ts` exports a shared `defaultExtensions` array (StarterKit + H1–H3) so Step 11's canvas text-block editor sees bit-identical formatting — prerequisite for the future "promote section to canvas block" flow. `BrandEditorForm` holds `LocalSection[]` with `_key` (stable React key), optional `id` (omitted → server inserts), `label`, `body`, `priority`. Save rewrites `priority` to `(index + 1) * 1000` on the outgoing payload (stable sparse integers); server response replaces local state. `PointerSensor` uses `activationConstraint: { distance: 8 }` so clicks inside the TipTap editor don't accidentally start a drag. Drag handle is `GripVertical` with `{...attributes} {...listeners}` — drag zone is the handle only. `key={brand.id}` on `BrandEditorForm` prevents query-refetch from nuking in-progress edits. Suggested-category chips (from `SUGGESTED_SECTIONS` in shared) hide once their label is in use.
+
+### Step 10 — Project split-screen layout
+
+`/projects/$projectId` fetches `ProjectDetail` via `useProjectDetail` and subscribes to `project:<id>` via `useProjectStream`. Three new components under `src/components/project/`:
+
+- **`TopBar.tsx`** — breadcrumb `{brand.name} / {project.name}`; brand is a typed `<Link>` to `/brands/$brandId`.
+- **`ShortlistToggle.tsx`** — two-button pill with `role="tablist"`, exports `ShortlistMode = 'all' | 'shortlist'`; shortlist count rendered inline (`Shortlist (N)`).
+- **`SplitScreen.tsx`** — hand-rolled draggable divider (~55 lines). Decision: **not vaul** — vaul is drawer-shaped, not split-pane-shaped. `setPointerCapture` on pointer-down for drag semantics even when cursor leaves the handle; `hasPointerCapture`-guarded release so StrictMode double-fire doesn't throw. `leftPct` clamped 25–65%, defaults to 36. Not persisted in v1.
+
+`CanvasPane` / `ChatPane` stay inline in the route for now — they're placeholders in Step 10 and get replaced in Step 11 (chat) / Step 12 (canvas blocks). `CanvasPane` already wires the client-side shortlist filter (`useMemo` over `Set<blockId>`) so toggling works before block renderers land.
+
+### Step 11 — Chat pane (`useAgentChat`)
+
+First end-to-end consumer of the Phase-6 SSE route from the browser. New deps: `react-markdown` + `remark-gfm` (~40 kB gz, paid once) for assistant bubbles — plain text would read `* tagline` literally the first time the model returns a list.
+
+- **`src/agent/sseParser.ts`** (~40 lines) — stateful chunk-wise `SseFrameParser`. Splits on `\n\n`, walks lines (`:` = keep-alive comment, `event:`, `data:`), strips leading `: ` per SSE spec. Bringing in `eventsource-parser` was rejected: we own both ends and the format is a narrow subset.
+- **`src/agent/useAgentChat.ts`** — `{ status, error, send, stop }`. Intentionally narrower than Vercel's `useChat`: **messages are not hook state**. Server `message` events carry full segments (flush-on-boundary, not per-token), feed straight into `applyAgentEvent`, which appends to `ProjectDetail.recentMessages`. Same path realtime echoes take — id-based dedup makes late-arriving realtime echoes of an SSE message a no-op. User turn is optimistically written with a client-minted `crypto.randomUUID()`; the server persists the user turn before streaming but does **not** echo it on SSE, so no dup. Errors: 401 → `logout()` + toast; 409 `AGENT_BUSY` → dedicated toast, no auto-retry; abort via `stop()` → silent. Uses raw `fetch` not `hono/client` because the RPC client buffers — streaming needs a reader.
+- **`src/realtime/useProjectStream.ts`** — the internal `applyEvent` helper is now exported as `applyAgentEvent` so both consumers (realtime subscription, `useAgentChat`) import the same function. Step 13 in the plan lifts it to its own module; the rename anticipates the move. Behaviour unchanged — bit-identical cache writes from SSE and realtime paths, preserving the Phase-6 applier invariant.
+- **`src/components/project/ChatPane.tsx`** — transcript reads `ProjectDetail.recentMessages`. User bubbles: right-aligned, `whitespace-pre-wrap`, no markdown (users typing `*asterisks*` shouldn't render). Assistant bubbles: `ReactMarkdown` + `remarkGfm` with `prose prose-sm dark:prose-invert`. Autoscroll-while-pinned — flips off when user scrolls up to re-read. Input is a `<textarea>` with `Cmd/Ctrl+Enter` to send (Enter = newline); draft clears before awaiting the fetch so the user can start the next turn immediately. `status === 'streaming'` renders a muted `Thinking…` line — more honest than a phantom per-token cursor, since message events are flush-on-boundary.
+
+Tool-call accordion UI (`🛠 add_canvas_block {…}`) is deferred to Step 12 / Step 14 polish — `tool-call` events pass through `applyAgentEvent` as a cache no-op today.
+
+### Verification
+
+```
+pnpm typecheck      ✔  9/9 workspaces clean
+pnpm lint           ✔  clean
+pnpm format:check   ✔  clean
+pnpm test           ✔  167 tests (unchanged since 0.7.1)
+pnpm --filter @brandfactory/web build  ✔  dist/ clean
+```
+
+### Items deferred from Steps 7–11
+
+- **Canvas block renderers** — Step 12 scope; `CanvasPane` shows `{visible.length} block(s)` summaries today.
+- **Tool-call accordion UI** in chat — Step 12 / Step 14 polish.
+- **`useAgentChat` + `sseParser` unit tests** — Step 15 alongside the rest of the frontend vitest suite.
+- **Split-screen width persistence** — re-evaluate after Phase 7.
+- **Route-loader prefetch** of `ProjectDetail` — hook-in-component is simpler and identical in behaviour once `QueryClient` is primed; plan mentions it as a future refinement.
+
+---
+
+## 0.7.2 — 2026-04-20
+
+Phase 7 Steps 3–6 — the app shell: URL surface, auth, typed API, realtime. Still no user-facing screens (those land in 0.7.3) but every primitive a screen needs is in place. Test count unchanged at 167 (realtime + hook coverage is Step 15's responsibility). Full step-by-step notes in `docs/completions/phase7-step-{3,4,5,6}.md`.
+
+### Step 3 — TanStack Router + route skeletons
+
+`@tanstack/react-router` installed; all seven URL surfaces (`/`, `/login`, `/workspaces`, `/workspaces/$wsId`, `/workspaces/$wsId/settings`, `/brands/$brandId`, `/projects/$projectId`) declared as placeholder routes. Flat tree — every route is a direct child of `rootRoute`; no nested `/workspaces/*` layout because no sub-layout is shared. `declare module '@tanstack/react-router' { interface Register { router: typeof router } }` registers the router type for ambient `<Link>` / `useParams()` / `router.navigate` type safety with no generated files. **Code-based, not file-based** — file-based via `@tanstack/router-plugin/vite` generates `routeTree.gen.ts` on first `vite` run, so `pnpm typecheck` would fail without running the dev server first. Migration is mechanical and deferred. `__root.tsx` renders a 48 px top bar + `<Outlet />` + `<Toaster />` (mounted once at root, route components call `toast()` imperatively). Auth guard per route: `beforeLoad` throws `redirect({ to: '/login' })` if `getAuthToken() === null`, or `redirect({ to: '/workspaces' })` for the login page when already authed.
+
+### Step 4 — Auth shell
+
+New deps: `zustand`, `@supabase/supabase-js`. `src/auth/store.ts` replaces the Step-3 stub with a Zustand store — `token` initialises from `sessionStorage['bf_token']` (survives refresh), `userId` starts `null` and is populated by `AuthBoundary` on boot. `getAuthToken()` reads `useAuthStore.getState().token` synchronously — safe to call in `beforeLoad` and the API client's 401 interceptor without leaking React context. `src/auth/AuthBoundary.tsx` wraps `<Outlet />` in the root layout: on mount, if a token is present, validates it against `GET /me`; on 200 sets `userId`, on non-200 calls `logout()` + `navigate({ to: '/login' })`, on network error treats as transient and lets the user proceed. Lazy `useState` initializer reads `getState().token` once at component creation — React 19's `react-hooks/refs` rule prohibits `.current` access during render.
+
+Two providers under `src/auth/providers/`:
+
+- **`local.tsx`** — dev-token prompt. `fetch('/api/me')` with typed bearer; on 200, `setAuth(token, data.id)` + navigate.
+- **`supabase.tsx`** — magic-link. `createClient(url, key)` guarded so the module is safe to import without env vars. `onAuthStateChange('SIGNED_IN')` listener validates the Supabase access token against `GET /me` (server's Supabase adapter verifies the JWT). `signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } })`.
+
+`login.tsx` picks the provider from `import.meta.env.VITE_AUTH_PROVIDER` (defaults to `local`); Vite tree-shakes the unused provider in prod builds. `vite-env.d.ts` types all `VITE_*` env vars as `string | undefined`.
+
+### Step 5 — Typed API client (`hono/client`) + React Query
+
+New deps: `@tanstack/react-query`, `hono`. `@brandfactory/server` added to **devDependencies** (type-only `import type { AppType }`) — Vite erases the import from the bundle. `src/api/client.ts` exports:
+
+- **`AppError`** — `{ code, status, message }`, thrown by `callJson<T>(res)` on any non-2xx. Downstream `catch (e) if (e instanceof AppError)` unlocks code-specific handling (e.g. `AGENT_BUSY`).
+- **`callJson<T>(res)`** — parses `{ code, message }` on error, falls back to `statusText`/`'UNKNOWN'`. **401 side effect:** calls `useAuthStore.getState().logout()` before throwing, so the store clears immediately; the router's `beforeLoad` redirects on the next navigation.
+- **`api`** — `hc<AppType>(import.meta.env.VITE_API_BASE_URL ?? '/api', { headers: () => token ? { authorization: Bearer } : {} })`. Callback reads `getAuthToken()` per-call — no re-creation after login/logout.
+- **`queryClient`** — `staleTime: 30s`; retry skips 4xx (no retries on user/auth errors), allows 2 retries on 5xx/network.
+
+Query hooks in `src/api/queries/` — one file per domain, each exports a `*Keys` factory + `useFoo()` hooks wrapping `callJson<T>` on the typed hono response. `useProjectDetail` is the primary loader for the split-screen; it returns the widened `ProjectDetail` (project + canvas + blocks + shortlist + recentMessages + brand) in one round-trip. `useProjectBlocks` / `useProjectMessages` share keys with `useProjectDetail`'s sub-arrays via `projectKeys.blocks(id)` / `projectKeys.messages(id)` so `applyAgentEvent` can invalidate per-slice.
+
+**Cross-environment `blobs.ts` fix** — `@brandfactory/server`'s type import pulls `routes/blobs.ts` into web's TypeScript (`lib: ["DOM"]`), where `new Response(bytes, ...)` needed `Uint8Array<ArrayBuffer>` not `Uint8Array<ArrayBufferLike>`. Cast is a no-op at runtime, satisfies both server (`lib: ["ES2022"]`) and web contexts.
+
+### Step 6 — Realtime client + hooks
+
+`src/realtime/client.ts` — singleton `RealtimeClient` with **ref-counted channel subscriptions over one WebSocket**. State machine: `idle → connecting → open ↔ reconnecting`. Socket opens on first `subscribe()` call, closes when the last handler unmounts. Multiple components on the same project share a single channel subscription; ref-counting (per-handler, not per-channel) prevents the last unsubscriber from tearing down what other mounted components still need.
+
+- **Reconnect:** exponential backoff starting at 1 s, doubling, capped at 30 s; resets to 1 s on successful `onOpen`. `onClose` is the canonical reconnect trigger — no `error` listener (WS errors always fire immediately before `close` and carry no useful data).
+- **Resync notification:** `onResynced(handler)` fires on every reconnect *after* the first (`connectionCount > 1`). `useProjectStream` uses this to invalidate `projectKeys.detail` — covers mutations that arrived while disconnected. Initial connection is skipped to avoid spurious invalidation at mount.
+- **Payload validation:** raw frames go through `RealtimeServerMessageSchema.safeParse`; invalid frames silently dropped. Narrow trust boundary.
+- **WS URL:** `toWsUrl()` handles relative (`/rt` → `ws(s)://host/rt`) and absolute (`http→ws`, `https→wss`). Token appended as `?token=<jwt>` — matches the server's `?token` fallback in `ws.ts` (browser `WebSocket` can't send `Authorization` headers).
+
+`useRealtime(channel, handler)` is a thin `useEffect` wrapper returning the unsubscribe cleanup; callers memoize the handler (the hook documents this). `useProjectStream(projectId)` subscribes to `project:<projectId>` and runs an internal `applyEvent(qc, projectId, event)` dispatcher over the `AgentEvent` union:
+
+| Event | Cache action |
+|-------|--------------|
+| `canvas-op/add-block` | Append (dedupe by `block.id`) to `projectKeys.detail` + `projectKeys.blocks` |
+| `canvas-op/update-block` | Spread `op.patch` onto matching block in both caches |
+| `canvas-op/remove-block` | Filter out `op.blockId` from both caches |
+| `pin-op/pin` \| `unpin` | Flip `isPinned`; add/remove from `shortlistBlockIds` in `detail` |
+| `message` | Append (dedupe by `message.id`) to `recentMessages` |
+| `tool-call` | No-op (chat-pane render only) |
+
+`applyEvent` was renamed to `applyAgentEvent` and exported in Step 11 so `useAgentChat` can reuse the exact same cache writes; see 0.7.3.
+
+### Items deferred from Steps 3–6
+
+- **File-based route generation** (`routeTree.gen.ts`) — migrate when route surface stabilises.
+- **Route loaders + `pendingComponent`** — prefetch hooks and loading skeletons are Steps 5/14 scope.
+- **Supabase token rotation** — mid-session rotations use the old token until next WS reconnect; fix is listening to `useAuthStore` and forcing reconnect on token change.
+- **Centralized mutation hooks** — mutations are inline in the consuming routes (Steps 7–12) today; promoting them to `queries/` is optional polish.
+- **Router context injection** of `queryClient` — SPA-only target doesn't need SSR-safe loader context.
+- **Multi-tab logout** — `sessionStorage` is per-tab; a `localStorage` `storage` event listener would propagate; deferred.
+
+---
+
+## 0.7.1 — 2026-04-20
+
+Phase 7 Steps 0–2 — front-loaded server surface + the Vite/React/shadcn scaffold. Step 0 is the largest backend touch in Phase 7 and comes before any React code so the frontend has a stable HTTP contract to typecheck against. Test count 140 → 167 (+27), all in new server route tests. `pnpm --filter @brandfactory/web build` produces `dist/` clean. Typecheck/lint/format clean across 9 workspaces. Full step-by-step notes in `docs/completions/phase7-steps-0-2.md`.
+
+### Step 0 — Close the server gaps the frontend needs
+
+Four read endpoints, five user canvas-op endpoints, two authed blob signed-URL endpoints.
+
+**Step 0.1 — Reads.** `GET /projects/:id/canvas/blocks` → `CanvasBlock[]` (thin wrapper over `listActiveBlocks`). `GET /projects/:id/shortlist` → `{ blockIds }`. `GET /projects/:id/messages[?limit]` → oldest-first `AgentMessage[]` (limit Zod-coerced, capped at 200, defaults to 40). And **`GET /projects/:id` widened to `ProjectDetail`** — four parallel reads via `Promise.all` after loading the canvas returning `Project & { canvas, blocks, shortlistBlockIds, recentMessages, brand }`. The shape lives in `packages/shared/src/project/detail.ts` and uses `z.intersection(ProjectSchema, z.object({...}))` — not `.extend()` — because `ProjectSchema` is a `z.discriminatedUnion` and discriminated unions don't expose `.extend()`.
+
+**Step 0.2 — User canvas-ops.** All five mutating routes in `packages/server/src/routes/canvas.ts`, each following the same **DB write → event log append → realtime publish** invariant the agent applier respects. Human and agent paths produce bit-identical realtime events so sibling clients can't distinguish them. Shared helpers: `emitCanvasOp`, `emitPinOp`, `requireBlock` (fetch by id + throw 404 if missing / wrong canvas / soft-deleted — prevents mutations leaking across project boundaries).
+
+- **`POST /projects/:id/canvas/blocks`** — body is a `z.discriminatedUnion('kind', …)` over `text`/`image`/`file`. If `position` omitted, server computes `max(existing) + 1000`. The `+1000` strategy (not `Date.now()`) matters because `canvas_blocks.position` is `integer` (32-bit); `Date.now()` would overflow.
+- **`PATCH /projects/:id/canvas/blocks/:blockId`** — flat partial schema (`position?`, `body?`, `alt?`, `width?`, `height?`). Ownership checked via `requireBlock`.
+- **`POST .../pin`** and **`POST .../unpin`** → `setPinned(id, true|false)` + `emitPinOp`.
+- **`DELETE .../blockId`** → soft-delete (`deleted_at = now()`), `204 No Content`. Restore UI deferred.
+
+New facade helpers: `getBlockById` added to `@brandfactory/db` (5 lines) + wired into `packages/server/src/db.ts` for O(1) ownership verification in `requireBlock`. `updateBlock` and `softDeleteBlock` also exposed on the facade (they existed in `@brandfactory/db` but weren't wired into the server yet).
+
+**Step 0.3 — Blob signed-URL mints.** Both under `/blob-urls/*` with auth middleware applied at that prefix; the existing `/blobs/*` prefix stays auth-free because the signed URL *is* the capability — splitting prefixes avoids a negative-lookahead exception in the auth config.
+
+- **`POST /blob-urls/upload-url`** — validates `contentType` against `ALLOWED_UPLOAD_MIMES` (jpeg/png/gif/webp/svg/pdf/docx/txt, defined as a `const` tuple in `packages/shared/src/blob/upload.ts`), checks `size <= BLOB_MAX_BYTES` (25 MiB, 413 on overflow matching `/blobs`). Key format `uploads/<yyyy>/<mm>/<uuid>-<safe-filename>` — year/month prefix is time-indexable, UUID prevents guessing. 400 `INVALID_CONTENT_TYPE` on bad mime. 5-min TTL.
+- **`GET /blob-urls/:key{.+}/read-url`** — Hono regex path syntax `/:key{.+}` captures multi-segment keys (needed because keys contain slashes). Auth is sufficient access control for v1 single-seat self-hosted; cross-workspace blob authz flagged for later.
+
+**Tests (+27):** `routes/canvas.test.ts` (16 cases — 401/404 per route, happy path + realtime assertion, position auto-computation, soft-delete idempotency), `routes/messages.test.ts` (5), `routes/blobs-auth.test.ts` (6).
+
+### Step 1 — Vite + React 19 scaffold
+
+`pnpm --filter @brandfactory/web dev` boots on `:5173`; `pnpm --filter @brandfactory/web build` produces `dist/`. Three concerns in `vite.config.ts`: `@vitejs/plugin-react`, `@/` path alias mirrored in `tsconfig.json`, dev proxy (`/api` → `http://localhost:3001` with prefix strip, `/rt` → `ws://localhost:3001/rt` with `ws: true`). `tsconfig.json` gains `"jsx": "react-jsx"` (automatic transform — no `import React` in components) and `"paths": { "@/*": ["./src/*"] }`. ESLint: three new plugins (`eslint-plugin-react`, `-react-hooks`, `-jsx-a11y`) scoped to `packages/web/src/**` via a dedicated block in root `eslint.config.js`; `react/react-in-jsx-scope` and `react/prop-types` disabled (irrelevant under automatic JSX transform + TypeScript). `packages/web/vitest.config.ts` stands up the jsdom environment and is added to the root projects array — the root config's "per-package configs widen the environment when `web` lands" comment is now honoured. New deps: `react@^19`, `react-dom@^19`, `@vitejs/plugin-react`, `vite`, `@types/react`, `@types/react-dom`.
+
+### Step 2 — Tailwind v4 + shadcn/ui primitives
+
+**Decision: Tailwind v4 via `@tailwindcss/vite`, not v3 + PostCSS** — v4 is stable, the Vite plugin integrates directly into the bundler pipeline, no `postcss.config.js` to maintain. `src/index.css` uses v4 syntax: `@import 'tailwindcss'`, `@plugin 'tailwindcss-animate'`, `@custom-variant dark (&:is(.dark *))` for class-based dark mode, `@theme inline { --color-*: var(--*) }` to map CSS variables into Tailwind's utility namespace without a `tailwind.config.js`. Colour palette is oklch-based slate (matches shadcn's "default" theme); single accent is slate; polish later.
+
+Seven shadcn primitives at `@/components/ui/*`: `button`, `input`, `label`, `card`, `select`, `dialog`, `sonner`. Function-style declarations (no `React.forwardRef` — React 19 passes refs as props on standard elements; Radix primitives handle their own ref forwarding). `data-slot="*"` styling hooks. `sonner.tsx` overrides the Toaster's CSS variables so toast theming tracks the shared palette. `components.json` declares `tailwind.config: ""` (v4 has no config file) so `pnpm dlx shadcn@latest add <component>` calls from within `packages/web` work without re-init. New deps: `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`, `sonner`, four Radix primitives; devDeps: `tailwindcss`, `@tailwindcss/vite`, `tailwindcss-animate`. Prod bundle: CSS ~24 kB (~5 kB gz), JS ~190 kB (React 19 + Radix).
+
+### Items deferred from Steps 0–2
+
+- **Optimistic canvas mutations** — every user canvas-op round-trips today. Acceptable for debounced typing; visible latency for pin toggles. Post-Phase-7 hardening.
+- **Canvas block restore UI** — soft-delete is server-side only; no trash view.
+- **Cross-workspace blob read authz** — `/blob-urls/:key/read-url` mints for any authed user; scope when >1 seat exists.
+- **Frontend unit tests for Steps 1–2** — scaffold + CSS setup have no testable logic units; Step 15 covers components.
 
 ---
 

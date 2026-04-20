@@ -14,9 +14,12 @@ import { requestIdMiddleware } from './middleware/request-id'
 import type { AgentConcurrencyGuard } from './agent/concurrency'
 import { createAgentRouter } from './routes/agent'
 import { createBlobsRouter } from './routes/blobs'
+import { createBlobUrlsRouter } from './routes/blobs-auth'
 import { createBrandsRouter, createWorkspaceBrandsRouter } from './routes/brands'
+import { createCanvasRouter } from './routes/canvas'
 import { createHealthRouter } from './routes/health'
 import { createMeRouter } from './routes/me'
+import { createMessagesRouter } from './routes/messages'
 import { createBrandProjectsRouter, createProjectsRouter } from './routes/projects'
 import { createSettingsRouter } from './routes/settings'
 import { createWorkspacesRouter } from './routes/workspaces'
@@ -51,6 +54,7 @@ export function createApp(deps: AppDeps) {
   app.use('/workspaces/*', authRequired)
   app.use('/brands/*', authRequired)
   app.use('/projects/*', authRequired)
+  app.use('/blob-urls/*', authRequired)
 
   const composed = app
     .route('/health', createHealthRouter())
@@ -61,6 +65,8 @@ export function createApp(deps: AppDeps) {
     .route('/brands', createBrandsRouter({ db: deps.db }))
     .route('/brands', createBrandProjectsRouter({ db: deps.db }))
     .route('/projects', createProjectsRouter({ db: deps.db }))
+    .route('/projects', createCanvasRouter({ db: deps.db, realtime: deps.realtime }))
+    .route('/projects', createMessagesRouter({ db: deps.db }))
     .route(
       '/projects',
       createAgentRouter({
@@ -70,6 +76,10 @@ export function createApp(deps: AppDeps) {
         realtime: deps.realtime,
         agentGuard: deps.agentGuard,
       }),
+    )
+    .route(
+      '/blob-urls',
+      createBlobUrlsRouter({ storage: deps.storage, maxBytes: deps.env.BLOB_MAX_BYTES }),
     )
 
   if (deps.env.STORAGE_PROVIDER === 'local-disk') {

@@ -42,7 +42,7 @@ export function createBlobsRouter(deps: BlobsDeps) {
       }
       // Content-type persistence is a Phase 8 polish (plan task 4); the
       // Phase 4 default keeps uploads honest without a schema change.
-      return new Response(bytes, {
+      return new Response(bytes as Uint8Array<ArrayBuffer>, {
         headers: { 'content-type': 'application/octet-stream' },
       })
     })
