@@ -102,7 +102,7 @@ brandfactory/
 │       └── llm/          # AI SDK provider factory (OpenRouter, Anthropic,
 │                         # OpenAI, Ollama, ...)
 ├── docs/
-├── docker/               # docker-compose, Dockerfiles
+├── docker/               # docker-compose for local dev Postgres
 └── scripts/              # dev/setup/release scripts
 ```
 

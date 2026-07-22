@@ -2,6 +2,12 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import { Pool } from 'pg'
 import * as schema from './schema'
 
+// NB: registering a `pg` type parser for timestamptz here does NOT work —
+// drizzle passes its own `types.getTypeParser` in every query config, which
+// returns timestamp values verbatim so its column `mode` can handle them.
+// That override wins over the global registry. Timestamps are normalised to
+// ISO in `mappers.ts` instead; see the note there.
+
 // Lazy singleton: the pool / drizzle instance are constructed on first
 // access, not at module import. Lets test runners and tooling import
 // `@brandfactory/db` (e.g. for the `User` row type) without DATABASE_URL
@@ -16,6 +22,11 @@ function makePool(): Pool {
   if (!connectionString) {
     throw new Error('DATABASE_URL is required')
   }
+  // Pooler-safety invariant (Supabase PgBouncer in transaction mode, port
+  // 6543): do NOT enable server-side prepared statements on this Pool and
+  // do NOT introduce `pg-native` — both break transaction-mode pooling by
+  // assuming session-scoped state that PgBouncer multiplexes away.
+  // node-postgres' default path is safe (no prepared-statement cache).
   return new Pool({ connectionString })
 }
 

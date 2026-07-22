@@ -4,6 +4,7 @@ Latest releases at the top. Each version has a one-line entry in the index below
 
 ## Index
 
+- **0.9.1** — 2026-07-22 — Repo split: deployment specifics (`fly.toml`, `Dockerfile`, `.dockerignore`) move out of this OSS upstream into the deployment fork; Supabase auto-provisioning (`ensureUser`), pg pooler-safety and single-instance `native-ws` invariants ported upstream from that fork. Fixes API timestamps never having been ISO 8601 despite every schema declaring it. Documents why releases v7/v8 failed. 285 → **292 tests (+7)**.
 - **0.9.0** — 2026-07-22 — Navigation redesign: workspace home with brand grid + recent-work strip, brand hub with reachable projects, dropdown workspace switcher + breadcrumbs, smart `/` landing, rename/delete for brands and projects, Mission Systems visual identity — plus a review-remediation pass (9H) covering live-DB query coverage, blob cleanup on delete, and dark-mode contrast. 234 → **285 tests (+51)**.
 - **0.8.1** — 2026-07-22 — Fly deploy recipe recovered into the repo: `fly.toml` (saved from the live app), `packages/server/Dockerfile` (tsx runtime, pnpm filtered install), `packages/db/scripts/migrate.mjs` release migrator, root `.dockerignore`. Fixes releases v7/v8 failing on the missing migrate script; prod redeployed after 11 weeks stuck on the v5 image. 234 tests (unchanged).
 - **0.8.0** — 2026-04-20 — Phase 8 (scope-cut, no deploy recipe): `db:seed` dev token, root `.env.example` + drift guard, GitHub Actions CI on Postgres 16, README rewrite, `CORS_ALLOWED_ORIGINS` gates HTTP + WS. 234 tests (+11).
@@ -21,6 +22,81 @@ Latest releases at the top. Each version has a one-line entry in the index below
 - **0.3.0** — 2026-04-18 — Phase 2: `@brandfactory/db` lands — drizzle schema for 8 tables, singleton pg `Pool`, 18 query helpers, local-dev docker Postgres, and an end-to-end smoke check.
 - **0.2.0** — 2026-04-18 — Phase 1: `@brandfactory/shared` lands as the single source of truth for domain types and zod schemas, consumed by both `server` and `web`.
 - **0.1.0** — 2026-04-18 — Project bootstrap: vision, architecture blueprint, scaffolding plan, and Phase 0 repo foundation.
+
+---
+
+## 0.9.1 — 2026-07-22
+
+Repository split + upstream reconciliation. No product features.
+
+**This repo is the OSS upstream; deployment lives in a fork.** `fly.toml`,
+`packages/server/Dockerfile` and `.dockerignore` are removed here and now live
+only in the deployment fork (`missiongroupsystems/brandfactory`). This finishes
+what Phase 8 decided when it dropped the deploy half of its plan — opinionated
+deploy templates are a maintenance magnet and belong to whoever operates the
+service, not to the upstream. `packages/db/scripts/migrate.mjs` **stays**: it is
+a plain drizzle migrator any self-hoster needs, not Fly-specific.
+
+**0.8.1's premise was wrong, and it matters.** That entry claimed the deploy
+files "were in no checkout and nowhere in git history". They were — committed in
+the deployment fork as `8f3c6be "v1.0.0 — hosted-deploy baseline"` back in April.
+0.8.1 reconstructed from the live app what already existed in git, and committed
+the fix to the repo that isn't deployed. The fork's `fly.toml` release command
+has always called `packages/db/scripts/migrate.mjs`, a file that has never
+existed in the fork — which is the actual cause of the failed v7 (May 18) and
+v8 (Jul 20) releases. Reconciling the two repos is what fixes it.
+
+**Ported from the fork** (product code that never made it upstream; none of it
+conflicted — this repo had not touched these files since Phase 8):
+
+- **Supabase auto-provisioning.** `upsertUserById` in `@brandfactory/db` plus an
+  `ensureUser` seam in the Supabase auth adapter: on first verify per process
+  per `sub`, insert the `public.users` row so downstream FKs resolve. Dedup via
+  a process-level `Set`, `onConflictDoNothing` on the primary key, skipped when
+  the JWT carries no email claim, and failures are logged rather than thrown so
+  a DB hiccup cannot turn every authed request into a 401. +4 tests.
+- **pg pooler-safety invariant** documented in `packages/db/src/client.ts`: no
+  server-side prepared statements, no `pg-native` — both break Supabase
+  PgBouncer transaction-mode pooling.
+- **Single-instance `native-ws` commitment** documented in
+  `packages/server/src/adapters.ts`: the bus is in-process, so running more than
+  one instance silently drops cross-instance canvas-op fan-out. Horizontal scale
+  needs a second `RealtimeAdapter` branch first.
+
+### Timestamps on the wire were never ISO 8601
+
+Found by the live-DB query tests added in 0.9.0 the first time they ran against
+a real Postgres.
+
+Every timestamp column is `mode: 'string'`, and drizzle's string mode passes the
+driver value through **verbatim** — so the API has been emitting Postgres' own
+text format, `2026-07-22 07:57:59.635905+00`, while every schema in
+`@brandfactory/shared` declares `z.iso.datetime()`. The contract has been wrong
+since Phase 2.
+
+It stayed invisible because no route parses its own response and V8's
+`new Date()` accepts the Postgres format, so the frontend worked. Any stricter
+consumer — a generated client, a non-JS caller, `z.iso.datetime()` at a trust
+boundary — would have broken.
+
+Normalised in `mappers.ts`, which this package already treats as its read-side
+trust boundary. **Not** fixable at the driver: registering a `pg` type parser
+has no effect because drizzle supplies its own `types.getTypeParser` in every
+query config and that override wins — verified empirically before settling on
+the mapper seam. Sub-millisecond precision is dropped, inherent to
+ISO-8601-with-milliseconds.
+
+Guarded by three pure unit tests (Postgres format → ISO, ISO passes through
+unchanged, nullable `pinnedAt` / `deletedAt` stay null) so the regression is
+caught without a database.
+
+Test count 285 → **292 (+7)**: +4 Supabase auto-provisioning, +3 timestamp
+normalisation. With `DATABASE_URL` set, all 292 run and pass — no skips.
+
+Not ported: the fork's `tsx` move from `devDependencies` to `dependencies`
+(deploy-motivated — belongs with the deploy layer), and its independent
+implementations of projects-reachability and the Mission Systems visual pass,
+both of which 0.9.0 supersedes.
 
 ---
 

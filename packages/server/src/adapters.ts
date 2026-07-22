@@ -55,6 +55,14 @@ export function buildAdapters(env: Env): Adapters {
 
   // Only one realtime impl ships in Phase 3; widen the discriminated union
   // and the `RealtimeAdapter` type together as more land (decision 15).
+  //
+  // Single-instance commitment: `native-ws` is an in-process pub/sub —
+  // subscribers live in a `Map` on this Node heap. Running more than one
+  // server instance (Fly `scale count 2`, k8s `replicas > 1`, etc.)
+  // silently drops cross-instance fan-out: a canvas-op published on
+  // Machine A never reaches a subscriber on Machine B. Deploys that need
+  // horizontal scale must land a second `RealtimeAdapter` branch first
+  // (Supabase Realtime / Redis pub-sub / etc.).
   const realtime: RealtimeAdapter = { provider: 'native-ws', bus: createNativeWsRealtimeBus() }
 
   const llmConfig: LLMProviderConfig = {}

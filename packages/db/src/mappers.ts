@@ -48,13 +48,41 @@ function parseProseMirrorBody(body: unknown, blockOrSectionId: string): ProseMir
   return result.data
 }
 
+// Timestamps do NOT arrive as ISO 8601. Every timestamp column is declared
+// `mode: 'string'`, and drizzle's string mode passes the driver value through
+// verbatim — so what lands here is Postgres' own text format,
+// `2026-07-22 07:57:59.635905+00` (space separator, `+00` offset, microseconds).
+// Every wire schema in `@brandfactory/shared` declares these as
+// `z.iso.datetime()`, so the published contract disagreed with reality.
+//
+// It went unnoticed because no route parses its own response and V8's
+// `new Date()` accepts the Postgres format, so the frontend worked. Anything
+// stricter — a generated client, a non-JS consumer, or `z.iso.datetime()` at a
+// trust boundary — breaks on it.
+//
+// This has to happen here, not at the driver: registering a `pg` type parser
+// is ineffective because drizzle supplies its own `types.getTypeParser` per
+// query and that override wins. Mappers are already this package's read-side
+// trust boundary (see `parseProseMirrorBody`), so normalisation belongs here.
+//
+// Sub-millisecond precision is dropped — inherent to ISO-8601-with-ms, and
+// already true of any value that round-tripped through a JS `Date`.
+function toIsoTimestamp(value: string | Date): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
+}
+
+// Nullable variant for `pinnedAt` / `deletedAt`.
+function toIsoTimestampOrNull(value: string | Date | null): string | null {
+  return value === null ? null : toIsoTimestamp(value)
+}
+
 export function rowToWorkspace(row: WorkspaceRow): Workspace {
   return {
     id: row.id as WorkspaceId,
     name: row.name,
     ownerUserId: row.ownerUserId as UserId,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
 }
 
@@ -64,8 +92,8 @@ export function rowToBrand(row: BrandRow): Brand {
     workspaceId: row.workspaceId as WorkspaceId,
     name: row.name,
     description: row.description,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
 }
 
@@ -80,14 +108,6 @@ export function rowToBrandSummary(
     sectionCount: row.sectionCount,
     projectCount: row.projectCount,
   }
-}
-
-// Raw SQL / `greatest()` / correlated `max()` can hand back either an ISO
-// string (drizzle `mode: 'string'` columns) or a `Date` (node-pg default
-// for unbound timestamp expressions). Normalize at the mapper so the wire
-// always sees ISO strings.
-function toIsoTimestamp(value: string | Date): string {
-  return value instanceof Date ? value.toISOString() : value
 }
 
 export function rowToProjectSummary(
@@ -108,8 +128,8 @@ export function rowToGuidelineSection(row: GuidelineSectionRow): BrandGuidelineS
     body: parseProseMirrorBody(row.body, row.id),
     priority: row.priority,
     createdBy: row.createdBy,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
 }
 
@@ -117,8 +137,8 @@ export function rowToCanvas(row: CanvasRow): Canvas {
   return {
     id: row.id as CanvasId,
     projectId: row.projectId as ProjectId,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
 }
 
@@ -127,8 +147,8 @@ export function rowToProject(row: ProjectRow) {
     id: row.id as ProjectId,
     brandId: row.brandId as BrandId,
     name: row.name,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
   if (row.kind === 'freeform') {
     return { ...base, kind: 'freeform' as const }
@@ -164,11 +184,11 @@ export function rowToCanvasBlock(row: CanvasBlockRow): CanvasBlock {
     canvasId: row.canvasId as CanvasId,
     position: row.position,
     isPinned: row.isPinned,
-    pinnedAt: row.pinnedAt,
+    pinnedAt: toIsoTimestampOrNull(row.pinnedAt),
     createdBy: row.createdBy,
-    deletedAt: row.deletedAt,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    deletedAt: toIsoTimestampOrNull(row.deletedAt),
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   }
   switch (row.kind) {
     case 'text':
